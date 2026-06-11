@@ -27,11 +27,10 @@ The build script compiles the OS into the `build` directory. The image script th
 **Install the tools:**
 
 ```sh
-sudo apt install nasm qemu-system-x86 mtools wget
-wget https://github.com/open-watcom/open-watcom-v2/releases/download/Current-build/open-watcom-2_0-c-linux-x64
-chmod +x open-watcom-2_0-c-linux-x64
-./open-watcom-2_0-c-linux-x64 -i -np -ns -dDstDir="$HOME/watcom"
-rm open-watcom-2_0-c-linux-x64
+sudo apt install nasm qemu-system-x86 mtools snapd
+snap install snapd
+snap install open-watcom --beta
+export WATCOM=/snap/open-watcom/current
 ```
 
 ## Build
