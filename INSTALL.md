@@ -97,4 +97,17 @@ The run script launches LiberDOS in an interactive QEMU window. Run it without a
 ./run.sh --fdd ./image/floppy.img      # attach a floppy image
 ./run.sh --hdd ./image/disk.img        # attach a hard disk image
 ./run.sh --log                 # collect crash diagnostics (QEMU log, serial output)
+./run.sh --vnc                 # headless mode: serve the display over VNC
 ```
+
+### Remote use over VNC (Linux)
+
+When building on a remote machine over SSH, there is no local display for the QEMU window. The `--vnc` option runs QEMU headless instead: audio is disabled and the display is served over VNC on port `5900` (all interfaces, plus the optional display number, e.g. `--vnc 1` = port 5901).
+
+```sh
+./run.sh --hdd ./image/disk.img --vnc
+```
+
+Then connect with any VNC viewer (UltraVNC, TigerVNC, RealVNC, ...) to `<host>:5900`.
+
+Note: the VNC server has no authentication - use it only on a trusted network, or keep the port firewalled and tunnel it over SSH (`ssh -L 5900:127.0.0.1:5900 user@host`, then connect to `localhost:5900`).

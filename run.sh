@@ -15,12 +15,17 @@ build=$root/build
 
 usage() {
 	cat << EOF
-Usage: ./run.sh [--fdd floppy.img] [--hdd disk.img] [--log]
+Usage: ./run.sh [--fdd floppy.img] [--hdd disk.img] [--log] [--vnc [N]]
 
   --fdd floppy.img    attach a floppy image
   --hdd disk.img      attach a hard disk image
   --log               collect crash diagnostics (QEMU debug log,
 					  guest serial output - in build/log)
+  --vnc [N]           headless mode for SSH sessions: no local
+					  window, QEMU serves VNC display N (default 0,
+					  i.e. port 5900+N on all interfaces) and audio
+					  is disabled; connect with a VNC viewer
+					  (no VNC authentication - LAN/dev use only)
 
 At least one of --fdd / --hdd is required. The machine boots from
 the floppy when one is attached, otherwise from the hard disk.
@@ -31,6 +36,7 @@ EOF
 fdd=""
 hdd=""
 log=0
+vnc=""
 while [ $# -gt 0 ]; do
 	case $1 in
 	--fdd)
@@ -44,6 +50,16 @@ while [ $# -gt 0 ]; do
 		shift
 		;;
 	--log) log=1 ;;
+	--vnc)
+		# optional display number (default 0)
+		case $2 in
+		'' | *[!0-9]*) vnc=0 ;;
+		*)
+			vnc=$2
+			shift
+			;;
+		esac
+		;;
 	*) usage ;;
 	esac
 	shift
@@ -93,11 +109,22 @@ fi
 # Accel: single-threaded TCG - the multi-threaded JIT corrupts a
 # translation-block jump target under self-modifying game code
 # and crashes QEMU itself (verified via crash dump, QEMU 11.0.0).
+#
+# --vnc: headless variant for SSH sessions - VNC display instead
+# of a local SDL window, audio routed to the null backend (no
+# sound card / display on the host needed). Listens on all
+# interfaces without authentication - LAN/dev use only.
+if [ -n "$vnc" ]; then
+	echo "VNC server on port $((5900 + vnc)) (all interfaces, no auth)"
+	set -- "$@" -display "vnc=:$vnc" \
+		-audiodev none,id=snd0
+else
+	set -- "$@" -display sdl \
+		-audiodev sdl,id=snd0,in.voices=0
+fi
 exec qemu-system-i386 \
 	-accel tcg,thread=single \
 	-vga cirrus,retrace=precise \
-	-display sdl \
-	-audiodev sdl,id=snd0,in.voices=0 \
 	-machine pcspk-audiodev=snd0 \
 	-device sb16,audiodev=snd0 \
 	-device adlib,audiodev=snd0 \
