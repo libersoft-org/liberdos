@@ -98,6 +98,7 @@ The run script launches LiberDOS in an interactive QEMU window. Run it without a
 ./run.sh --hdd ./image/disk.img        # attach a hard disk image
 ./run.sh --log                 # collect crash diagnostics (QEMU log, serial output)
 ./run.sh --vnc                 # headless mode: serve the display over VNC
+./run.sh --spice               # headless mode: display + sound over SPICE
 ```
 
 ### Remote use over VNC (Linux)
@@ -110,4 +111,12 @@ When building on a remote machine over SSH, there is no local display for the QE
 
 Then connect with any VNC viewer (UltraVNC, TigerVNC, RealVNC, ...) to `<host>:5900`.
 
-Note: the VNC server has no authentication - use it only on a trusted network, or keep the port firewalled and tunnel it over SSH (`ssh -L 5900:127.0.0.1:5900 user@host`, then connect to `localhost:5900`).
+VNC does not carry sound. The `--spice` option serves the display **and audio** over the SPICE protocol instead (port `5930` by default, override with `--spice <port>`):
+
+```sh
+./run.sh --hdd ./image/disk.img --spice
+```
+
+Connect with a SPICE client to `spice://<host>:5930`. On Windows, install **virt-viewer** (includes the *Remote Viewer* GUI) - download the Windows installer from https://virt-manager.org/download (the "virt-viewer Win x64 MSI" link). On Linux, install the `virt-viewer` package and run `remote-viewer spice://<host>:5930`.
+
+Note: neither the VNC nor the SPICE server has authentication - use them only on a trusted network, or keep the ports firewalled and tunnel them over SSH (`ssh -L 5900:127.0.0.1:5900 user@host`, then connect to `localhost:5900`).

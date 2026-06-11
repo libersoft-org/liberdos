@@ -15,7 +15,7 @@ build=$root/build
 
 usage() {
 	cat << EOF
-Usage: ./run.sh [--fdd floppy.img] [--hdd disk.img] [--log] [--vnc [N]]
+Usage: ./run.sh [--fdd floppy.img] [--hdd disk.img] [--log] [--vnc [N]] [--spice [port]]
 
   --fdd floppy.img    attach a floppy image
   --hdd disk.img      attach a hard disk image
@@ -26,6 +26,11 @@ Usage: ./run.sh [--fdd floppy.img] [--hdd disk.img] [--log] [--vnc [N]]
 					  i.e. port 5900+N on all interfaces) and audio
 					  is disabled; connect with a VNC viewer
 					  (no VNC authentication - LAN/dev use only)
+  --spice [port]      headless mode with audio: QEMU serves the
+					  display and sound over SPICE on the given port
+					  (default 5930, all interfaces); connect with
+					  virt-viewer / Remote Viewer
+					  (no authentication - LAN/dev use only)
 
 At least one of --fdd / --hdd is required. The machine boots from
 the floppy when one is attached, otherwise from the hard disk.
@@ -37,6 +42,7 @@ fdd=""
 hdd=""
 log=0
 vnc=""
+spice=""
 while [ $# -gt 0 ]; do
 	case $1 in
 	--fdd)
@@ -56,6 +62,16 @@ while [ $# -gt 0 ]; do
 		'' | *[!0-9]*) vnc=0 ;;
 		*)
 			vnc=$2
+			shift
+			;;
+		esac
+		;;
+	--spice)
+		# optional port number (default 5930)
+		case $2 in
+		'' | *[!0-9]*) spice=5930 ;;
+		*)
+			spice=$2
 			shift
 			;;
 		esac
@@ -114,7 +130,15 @@ fi
 # of a local SDL window, audio routed to the null backend (no
 # sound card / display on the host needed). Listens on all
 # interfaces without authentication - LAN/dev use only.
-if [ -n "$vnc" ]; then
+#
+# --spice: like --vnc but with sound - display and audio are
+# served over the SPICE protocol (client: virt-viewer).
+if [ -n "$spice" ]; then
+	echo "SPICE server on port $spice (all interfaces, no auth)"
+	set -- "$@" -display none \
+		-spice "port=$spice,addr=0.0.0.0,disable-ticketing=on" \
+		-audiodev spice,id=snd0
+elif [ -n "$vnc" ]; then
 	echo "VNC server on port $((5900 + vnc)) (all interfaces, no auth)"
 	set -- "$@" -display "vnc=:$vnc" \
 		-audiodev none,id=snd0
