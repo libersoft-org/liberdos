@@ -1,0 +1,28 @@
+#!/bin/sh
+# ============================================================
+# format-file - on-save formatter dispatcher (Linux)
+#
+# VS Code (Run on Save) invokes "tools/format-file <file>" on
+# every save; the extensionless name resolves to this script on
+# Linux and to format-file.cmd on Windows (cmd.exe appends the
+# extension via PATHEXT, extensionless files are never run).
+# ============================================================
+set -eu
+
+dir="$(cd "$(dirname "$0")" && pwd)"
+
+if [ $# -eq 0 ]; then
+	echo "usage: format-file <file>" >&2
+	exit 1
+fi
+
+case "$1" in
+*.asm) exec "$dir/format-asm.sh" "$1" ;;
+*.ps1) exec "$dir/format-ps1.sh" "$1" ;;
+*.sh) exec "$dir/format-sh.sh" "$1" ;;
+*.c | *.h) exec "$dir/format-c.sh" "$1" ;;
+*)
+	echo "format-file: no formatter for $1" >&2
+	exit 1
+	;;
+esac

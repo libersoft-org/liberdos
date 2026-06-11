@@ -1,0 +1,9 @@
+build/
+hdd/
+image/
+.secret_git
+*.img
+*.bin
+*.ppm
+*.png
+*.log

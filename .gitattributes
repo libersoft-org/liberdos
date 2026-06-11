@@ -1,0 +1,5 @@
+# shell scripts and the extensionless dispatcher must stay LF
+*.sh				text eol=lf
+tools/format-file	text eol=lf
+# cmd batch files must stay CRLF
+*.cmd				text eol=crlf

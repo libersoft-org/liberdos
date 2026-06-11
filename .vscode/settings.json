@@ -1,0 +1,14 @@
+{
+	"emeraldwalk.runonsave": {
+		"commands": [
+			{
+				"match": "\\.(asm|ps1|sh)$",
+				"cmd": "\"${workspaceFolder}/tools/format-file\" \"${file}\""
+			}
+		]
+	},
+	"editor.formatOnSave": true,
+	"[shellscript]": {
+		"files.eol": "\n"
+	}
+}

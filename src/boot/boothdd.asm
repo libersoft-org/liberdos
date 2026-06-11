@@ -1,0 +1,218 @@
+; ============================================================
+; boothdd.asm - FAT16 partition boot sector (hard disk)
+;
+; Finds KERNEL.SYS in the FAT16 root directory and loads it at
+; 0x1000:0000 following the cluster chain, then jumps to it
+; with DL = the BIOS boot drive. All disk access goes through
+; EDD packet reads (AH=42h), so no CHS geometry is needed.
+;
+; The BPB below holds placeholders: image.ps1 copies this
+; sector into the image and then writes the real BPB values
+; over offsets 3..61. The code reads everything from its own
+; in-memory copy at run time.
+;
+; Memory map: 0x0600 free, 0x7C00 this sector, 0x7E00 FAT
+; sector cache, 0x8000+ root directory, 0x10000+ kernel.
+; ============================================================
+[BITS 16]
+[ORG 0x7C00]
+cpu 386
+
+KERNEL_SEG  equ 0x1000
+FAT_CACHE   equ 0x7E00          ; one FAT sector
+ROOT_BUF    equ 0x8000          ; whole root directory (<= 16 KB)
+
+	jmp short start
+	nop
+
+; --- BPB (FAT16 EBPB) - values patched in by image.ps1 ---
+bpbOem              db 'LIBERDOS'
+bpbBytesPerSec      dw 512
+bpbSecPerClus       db 4
+bpbReservedSecs     dw 1
+bpbNumFats          db 2
+bpbRootEntries      dw 512
+bpbTotalSecs        dw 0
+bpbMedia            db 0xF8
+bpbSecsPerFat       dw 64
+bpbSecsPerTrack     dw 63
+bpbHeads            dw 16
+bpbHiddenSecs       dd 63
+bpbTotalSecs32      dd 0
+bpbDriveNum         db 0x80
+bpbReserved         db 0
+bpbBootSig          db 0x29
+bpbVolumeId         dd 0
+bpbVolumeLabel      db '           '
+bpbFsType           db 'FAT16   '
+
+start:
+	jmp 0x0000:main             ; normalize CS:IP
+main:
+	cli
+	xor ax, ax
+	mov ds, ax
+	mov es, ax
+	mov ss, ax
+	mov sp, 0x7C00
+	sti
+	cld
+	mov [bpbDriveNum], dl       ; remember the boot drive
+
+	; --- fat_lba = hidden + reserved (root/data derive from it) ---
+	mov eax, [bpbHiddenSecs]
+	movzx ebx, word [bpbReservedSecs]
+	add eax, ebx
+	mov [fat_lba], eax
+
+	; --- root_lba = fat_lba + num_fats * secs_per_fat ---
+	movzx ecx, byte [bpbNumFats]
+	movzx ebx, word [bpbSecsPerFat]
+.fats:
+	add eax, ebx
+	loop .fats
+	mov [root_lba], eax
+
+	; --- data_lba = root_lba + root_entries*32/512 ---
+	movzx ebx, word [bpbRootEntries]
+	shr ebx, 4                  ; *32/512 = /16
+	add eax, ebx
+	mov [data_lba], eax
+
+	; --- load the whole root directory at ROOT_BUF ---
+	mov eax, [root_lba]
+	mov cx, bx                  ; BX = root sector count (low word)
+	mov bx, ROOT_BUF
+.load_root:
+	call read_sector
+	inc eax
+	add bx, 512
+	loop .load_root
+
+	; --- find KERNEL.SYS among the root entries ---
+	mov di, ROOT_BUF
+	mov cx, [bpbRootEntries]
+.find:
+	push cx
+	mov si, kernel_name
+	mov cx, 11
+	push di
+	repe cmpsb
+	pop di
+	pop cx
+	je .found
+	add di, 32
+	loop .find
+	mov si, msg_no_kernel
+	jmp fail
+
+.found:
+	mov si, [di+26]             ; SI = first cluster
+	mov ax, KERNEL_SEG
+	mov es, ax
+
+	; --- follow the FAT16 chain, one cluster at a time ---
+.load_kernel:
+	; LBA = data_lba + (cluster - 2) * secs_per_clus
+	movzx eax, si
+	sub eax, 2
+	movzx ecx, byte [bpbSecPerClus]
+	mul ecx                     ; EAX = (cl-2) * spc
+	add eax, [data_lba]
+	xor bx, bx                  ; ES:0
+	movzx cx, byte [bpbSecPerClus] ; CX = sectors in this cluster
+.cluster_secs:
+	call read_sector
+	inc eax
+	add bx, 512
+	loop .cluster_secs
+	mov ax, es                  ; advance destination one cluster
+	movzx cx, byte [bpbSecPerClus]
+	shl cx, 5                   ; *512/16 paragraphs
+	add ax, cx
+	mov es, ax
+
+	; --- next cluster: FAT16 entry = word at fat[cl*2] ---
+	mov ax, si
+	shr ax, 8                   ; FAT sector index = cl / 256
+	cmp ax, [fat_cached]
+	je .fat_ok
+	mov [fat_cached], ax
+	push si
+	push es                     ; ES points at the kernel dest;
+	xor si, si                  ; the cache lives in segment 0
+	mov es, si
+	movzx eax, ax
+	add eax, [fat_lba]
+	mov bx, FAT_CACHE
+	call read_sector
+	pop es
+	pop si
+.fat_ok:
+	mov bx, si
+	and bx, 0xFF
+	shl bx, 1
+	mov si, [FAT_CACHE + bx]
+	cmp si, 0xFFF8              ; end of chain?
+	jb .load_kernel
+
+	; --- hand over to the kernel ---
+	mov dl, [bpbDriveNum]
+	jmp KERNEL_SEG:0
+
+; ------------------------------------------------------------
+; read_sector: EDD read of 1 sector. EAX = LBA, ES:BX = dest.
+; Preserves EAX, BX, CX, SI, ES. Halts via fail on error.
+; ------------------------------------------------------------
+read_sector:
+	pushad
+	mov [dap_lba], eax
+	mov [dap_off], bx
+	mov ax, es
+	mov [dap_seg], ax
+	mov si, dap
+	mov dl, [bpbDriveNum]
+	mov ah, 0x42
+	int 0x13
+	jc .error
+	popad
+	ret
+.error:
+	mov si, msg_disk_err
+	; fall through to fail
+
+; --- fail: print DS:SI message, halt ---
+fail:
+	lodsb
+	test al, al
+	jz .hang
+	mov ah, 0x0E
+	mov bx, 0x0007
+	int 0x10
+	jmp fail
+.hang:
+	hlt
+	jmp .hang
+
+dap:
+	db 0x10, 0                  ; size, reserved
+	dw 1                        ; count
+dap_off:
+	dw 0
+dap_seg:
+	dw 0
+dap_lba:
+	dd 0
+	dd 0
+
+fat_cached    dw 0xFFFF         ; FAT sector index currently in the cache
+fat_lba       dd 0
+root_lba      dd 0
+data_lba      dd 0
+
+kernel_name   db 'KERNEL  SYS'
+msg_no_kernel db 'KERNEL.SYS not found', 13, 10, 0
+msg_disk_err  db 'Disk read error', 13, 10, 0
+
+	times 510-($-$$) db 0
+	dw 0xAA55
