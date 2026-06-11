@@ -1,5 +1,5 @@
 # ============================================================
-# run.ps1 - launches LiberDOS in QEMU (interactive window)
+# run.ps1 - launches the system in QEMU (interactive window)
 #
 # Windows counterpart of run.sh - same argument syntax.
 # Run without arguments to print usage.

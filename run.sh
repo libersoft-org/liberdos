@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================
-# run.sh - launches LiberDOS in QEMU (Linux)
+# run.sh - launches the system in QEMU (Linux)
 #
 # Native counterpart of run.ps1 - no PowerShell needed.
 # Run without arguments to print usage.

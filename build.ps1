@@ -45,7 +45,7 @@ $VolLab = $OSNAME.ToUpper().PadRight(11).Substring(0, 11)
 if ($LASTEXITCODE) { exit 1 }
 & $NASM -f bin "$src\boot\mbr.asm" -o "$boot\mbr.bin"
 if ($LASTEXITCODE) { exit 1 }
-& $NASM -f bin "$src\boot\boothdd.asm" -o "$boot\boothdd.bin"
+& $NASM -f bin "$src\boot\boothdd.asm" -o "$boot\boothdd.bin" -I "$obj/"
 if ($LASTEXITCODE) { exit 1 }
 
 # --- 2. kernel: NASM startup stub + OpenWatcom C, linked to a flat binary ---
