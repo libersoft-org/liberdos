@@ -15,11 +15,18 @@
 set -e
 
 # --- toolchain paths ---
-WATCOM=${WATCOM:-$HOME/watcom}
-if [ -d "$WATCOM/binl64" ]; then
+if [ -z "$WATCOM" ]; then
+	for dir in "$HOME/watcom" /snap/open-watcom/current; do
+		if [ -d "$dir/binl64" ]; then
+			WATCOM=$dir
+			break
+		fi
+	done
+fi
+if [ -n "$WATCOM" ] && [ -d "$WATCOM/binl64" ]; then
 	wbin=$WATCOM/binl64
 else
-	echo "Open Watcom not found - set WATCOM (looked in $WATCOM)" >&2
+	echo "Open Watcom not found - set WATCOM (looked in ~/watcom and /snap/open-watcom/current)" >&2
 	exit 1
 fi
 export WATCOM

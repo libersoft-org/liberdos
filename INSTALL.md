@@ -30,7 +30,6 @@ The build script compiles the OS into the `build` directory. The image script th
 sudo apt install nasm qemu-system-x86 mtools snapd
 snap install snapd
 snap install open-watcom --beta
-export WATCOM=/snap/open-watcom/current
 ```
 
 ## Build
