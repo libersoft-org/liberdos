@@ -146,23 +146,25 @@ inject_specs() {
 		fi
 		case $dest in
 		*/*)
-			# create parent directories on the image as needed
+			# create parent directories on the image as needed;
+			# -D sS skips existing ones and stdin is detached so
+			# mtools can never show an interactive clash prompt
 			parent=${dest%/*}
 			path=""
 			oldifs=$IFS
 			IFS=/
 			for d in $parent; do
 				path=$path$d
-				mmd -i "$drive" "::$path" 2>/dev/null || true
+				mmd -D sS -i "$drive" "::$path" </dev/null 2>/dev/null || true
 				path=$path/
 			done
 			IFS=$oldifs
 			;;
 		esac
 		if [ -d "$src" ]; then
-			mcopy -s -i "$drive" "$src" "::$dest"
+			mcopy -s -i "$drive" "$src" "::$dest" </dev/null
 		else
-			mcopy -i "$drive" "$src" "::$dest"
+			mcopy -i "$drive" "$src" "::$dest" </dev/null
 		fi
 	done
 }

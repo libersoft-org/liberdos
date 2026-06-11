@@ -86,15 +86,15 @@ The run script launches LiberDOS in an interactive QEMU window. Run it without a
 ### Windows
 
 ```powershell
-.\run.ps1 --fdd floppy.img     # attach a floppy image
-.\run.ps1 --hdd disk.img       # attach a hard disk image
+.\run.ps1 --fdd .\image\floppy.img     # attach a floppy image
+.\run.ps1 --hdd .\image\disk.img       # attach a hard disk image
 .\run.ps1 --log                # collect crash diagnostics (QEMU log, serial output)
 ```
 
 ### Linux
 
 ```sh
-./run.sh --fdd floppy.img      # attach a floppy image
-./run.sh --hdd disk.img        # attach a hard disk image
+./run.sh --fdd ./image/floppy.img      # attach a floppy image
+./run.sh --hdd ./image/disk.img        # attach a hard disk image
 ./run.sh --log                 # collect crash diagnostics (QEMU log, serial output)
 ```
