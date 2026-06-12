@@ -3,6 +3,7 @@
 ## Table of contents
 
 - [**About**](#about)
+- [**Screenshot**](#screenshot)
 - [**Key features**](#key-features)
 - [**Installation**](#installation)
 - [**License**](#license)
@@ -13,6 +14,10 @@
 ## About
 
 **LiberDOS** is a DOS-compatible operating system written from scratch in C and assembly. It is a small 16-bit real mode kernel with a broad DOS API that runs classic DOS software, including 32-bit titles that use DOS extenders.
+
+## Screenshot
+
+![Screenshot](./screenshot.webp)
 
 ## Key features
 
