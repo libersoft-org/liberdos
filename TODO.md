@@ -4,9 +4,6 @@
 
 ## New features
 
-- UMB?
-- Move XMS, EMS and MOUSE driver out of the kernel (as separate drivers) to spare some extra conventional memory
-- FAT32 support
 - CD-ROM driver (separate driver)
 - More DOS-familiar CLI commands / utilities
 - Make hard drive installer on floppy
@@ -18,3 +15,7 @@
 
 - .asm / .c / .h / .ps1 / .sh autoformater (must be multiplatform)
 - Linux build / run / make scripts (build.sh, run.sh, mtools)
+
+## Opened questions
+
+- Move XMS, EMS and MOUSE driver out of the kernel (as separate drivers) to spare some extra memory? Or just mouse?

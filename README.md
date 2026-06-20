@@ -30,8 +30,8 @@
 
 ### Storage
 
-- Boots from a floppy disk or from a hard disk partition.
-- FAT12 and FAT16 file systems with subdirectories, long file names (VFAT), multiple drives and file sharing/locking.
+- Boots from a FAT12 floppy disk or from a FAT16 or FAT32 hard disk partition.
+- FAT12, FAT16 and FAT32 file systems with subdirectories, long file names (VFAT), multiple drives and file sharing/locking.
 
 ### Command line shell
 
