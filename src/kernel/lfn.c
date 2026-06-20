@@ -36,11 +36,11 @@ typedef struct win_find_data {
 
 /* Active find scan, keyed by the handle returned in AX. */
 typedef struct lfn_find {
-	u8   in_use;
-	u8   drv;
-	u8   attr; /* search attribute mask */
-	u16  dir_cluster;
-	u16  index;                 /* next directory entry to read */
+	u8     in_use;
+	u8     drv;
+	u8     attr; /* search attribute mask */
+	clus_t dir_cluster;
+	u16    index;               /* next directory entry to read */
 	char pattern[LFN_NAME_MAX]; /* last-component pattern, upcased */
 } lfn_find;
 
@@ -256,12 +256,12 @@ static int find_scan(lfn_find *fs, win_find_data *fd, u8 dos_fmt) {
 /* Resolve a path into its directory cluster and the (long)
  * last-component pattern. Returns 0 or a DOS error code. */
 static u16 find_open(const char __far *path, lfn_find *fs) {
-	char *near_path = s_path;
-	u16   dir_cl;
-	u8    last11[11];
-	u16   err;
-	char *p;
-	char *base;
+	char  *near_path = s_path;
+	clus_t dir_cl;
+	u8     last11[11];
+	u16    err;
+	char  *p;
+	char  *base;
 	err = fat_resolve_dir(path, &dir_cl, last11);
 	if (err != 0) {
 		return err;
@@ -365,7 +365,7 @@ static int ci_equal(const char *a, const char *b) {
 
 /* Resolve path to (parent dir cluster, near copy, last-component
  * pointer into the copy). Returns 0 or a DOS error code. */
-static u16 lfn_split(const char __far *path, u16 *dir_cl, char *near_path,
+static u16 lfn_split(const char __far *path, clus_t *dir_cl, char *near_path,
                      char **base) {
 	u8    last11[11];
 	u16   err;
@@ -386,7 +386,7 @@ static u16 lfn_split(const char __far *path, u16 *dir_cl, char *near_path,
 
 /* Find longname in dir_cl on drive drv. 0 = found (*e83, 8.3
  * entry index *short_index), -1 = not found. */
-static int lfn_lookup(u8 drv, u16 dir_cl, const char *longname, dirent83 *e83,
+static int lfn_lookup(u8 drv, clus_t dir_cl, const char *longname, dirent83 *e83,
                       u16 *short_index) {
 	u16      idx = 0;
 	dirent83 e;
@@ -430,7 +430,8 @@ static void f71_open(iregs __far *r) {
 	char             *base;
 	dirent83          e;
 	u8                short11[11];
-	u16               dir_cl, err, sidx;
+	clus_t            dir_cl;
+	u16               err, sidx;
 	u16               access = r->bx;
 	u16               attrib = r->cx;
 	u16               action = r->dx;
@@ -486,7 +487,7 @@ static void f71_open(iregs __far *r) {
 	fmemset(&e, 0, sizeof(e));
 	fmemcpy(e.name, short11, 11);
 	e.attr = (u8)((attrib & 0x27) | ATTR_ARCHIVE);
-	e.cluster = 0;
+	dirent_set_cluster(&e, 0);
 	e.size = 0;
 	e.time = clock_dos_time();
 	e.date = clock_dos_date();
@@ -510,7 +511,8 @@ static void f71_mkdir(iregs __far *r) {
 	char             *base;
 	dirent83          e;
 	u8                short11[11];
-	u16               dir_cl, err, sidx, cl;
+	clus_t            dir_cl, cl;
+	u16               err, sidx;
 	const char __far *path = (const char __far *)MK_FP(r->ds, r->dx);
 	err = lfn_split(path, &dir_cl, near_path, &base);
 	if (err != 0) {
@@ -543,20 +545,20 @@ static void f71_mkdir(iregs __far *r) {
 	e.attr = ATTR_DIR;
 	e.time = clock_dos_time();
 	e.date = clock_dos_date();
-	e.cluster = cl;
+	dirent_set_cluster(&e, cl);
 	if (fat_dir_set(cl, 0, &e) != 0) {
 		int21_error(r, ERR_ACCESS_DENIED);
 		return;
 	}
-	e.name[1] = '.';    /* ".." entry */
-	e.cluster = dir_cl; /* 0 = root, per spec */
+	e.name[1] = '.';                /* ".." entry */
+	dirent_set_cluster(&e, dir_cl); /* 0 = root, per spec */
 	if (fat_dir_set(cl, 1, &e) != 0) {
 		int21_error(r, ERR_ACCESS_DENIED);
 		return;
 	}
 	fmemcpy(e.name, short11, 11); /* parent entry at the 8.3 slot */
 	e.attr = ATTR_DIR;
-	e.cluster = cl;
+	dirent_set_cluster(&e, cl);
 	if (fat_dir_set(dir_cl, sidx, &e) != 0 || fat_commit() != 0) {
 		int21_error(r, ERR_ACCESS_DENIED);
 	}
@@ -567,7 +569,8 @@ static void f71_rmdir(iregs __far *r) {
 	char             *near_path = s_path;
 	char             *base;
 	dirent83          e;
-	u16               dir_cl, err, sidx;
+	clus_t            dir_cl;
+	u16               err, sidx;
 	u8                drv;
 	const char __far *path = (const char __far *)MK_FP(r->ds, r->dx);
 	err = lfn_split(path, &dir_cl, near_path, &base);
@@ -597,7 +600,8 @@ static void f71_chdir(iregs __far *r) {
 	char             *near_path = s_path;
 	char             *base;
 	dirent83          e;
-	u16               dir_cl, err, sidx;
+	clus_t            dir_cl;
+	u16               err, sidx;
 	const char __far *path = (const char __far *)MK_FP(r->ds, r->dx);
 	err = lfn_split(path, &dir_cl, near_path, &base);
 	if (err != 0) {
@@ -620,7 +624,8 @@ static void f71_delete(iregs __far *r) {
 	char             *near_path = s_path;
 	char             *base;
 	dirent83          e;
-	u16               dir_cl, err, sidx;
+	clus_t            dir_cl;
+	u16               err, sidx;
 	u8                drv;
 	const char __far *path = (const char __far *)MK_FP(r->ds, r->dx);
 	err = lfn_split(path, &dir_cl, near_path, &base);
@@ -654,7 +659,8 @@ static void f71_attr(iregs __far *r) {
 	char             *near_path = s_path;
 	char             *base;
 	dirent83          e;
-	u16               dir_cl, err, sidx;
+	clus_t            dir_cl;
+	u16               err, sidx;
 	u8                sub = (u8)(r->bx & 0xFF);
 	const char __far *path = (const char __far *)MK_FP(r->ds, r->dx);
 	err = lfn_split(path, &dir_cl, near_path, &base);
@@ -685,7 +691,8 @@ static void f71_rename(iregs __far *r) {
 	char    *obase, *nbase;
 	dirent83 oe, ne;
 	u8       short11[11];
-	u16      odir, ndir, err, osidx, nsidx;
+	clus_t   odir, ndir;
+	u16      err, osidx, nsidx;
 	u8       drv;
 	err = lfn_split((const char __far *)MK_FP(r->ds, r->dx), &odir, oldp,
 	                &obase);

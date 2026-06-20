@@ -43,20 +43,20 @@
 	   * NUL */
 
 typedef struct fhandle {
-	u8  open; /* SFT refcount, 0 = slot free */
-	u8  dev;
-	u8  mode;        /* access bits of open AL: 0=read 1=write 2=rdwr */
-	u8  smode;       /* full open AL incl. sharing bits (share.c) */
-	u8  dirty;       /* size/cluster changed: flush on close */
-	u8  drv;         /* volume the file lives on (0=A 2=C) */
-	u16 dir_cluster; /* directory holding our dirent */
-	u16 dir_index;   /* dirent index inside it */
-	u16 first_cluster;
-	u16 cur_cluster;     /* cluster containing cur_cluster_pos */
-	u32 cur_cluster_pos; /* file pos of cur_cluster's first byte */
-	u32 pos;
-	u32 size;
-	u16 ftime, fdate; /* stamp written back on flush */
+	u8     open; /* SFT refcount, 0 = slot free */
+	u8     dev;
+	u8     mode;        /* access bits of open AL: 0=read 1=write 2=rdwr */
+	u8     smode;       /* full open AL incl. sharing bits (share.c) */
+	u8     dirty;       /* size/cluster changed: flush on close */
+	u8     drv;         /* volume the file lives on (0=A 2=C) */
+	clus_t dir_cluster; /* directory holding our dirent */
+	u16    dir_index;   /* dirent index inside it */
+	clus_t first_cluster;
+	clus_t cur_cluster;     /* cluster containing cur_cluster_pos */
+	u32    cur_cluster_pos; /* file pos of cur_cluster's first byte */
+	u32    pos;
+	u32    size;
+	u16    ftime, fdate; /* stamp written back on flush */
 } fhandle;
 
 static fhandle sft[NUM_SFT];
@@ -69,17 +69,17 @@ static u8  default_dta[128];
  * DTA + the documented result record at offset 21. */
 #pragma pack(push, 1)
 typedef struct findstate {
-	u8   pattern[11];
-	u8   attr;
-	u16  dir_cluster;
-	u16  index;
-	u8   drv;
-	u8   unused[4];
-	u8   res_attr; /* offset 21: documented DOS layout */
-	u16  res_time;
-	u16  res_date;
-	u32  res_size;
-	char res_name[13];
+	u8     pattern[11];
+	u8     attr;
+	clus_t dir_cluster;
+	u16    index;
+	u8     drv;
+	u8     unused[2];
+	u8     res_attr; /* offset 21: documented DOS layout */
+	u16    res_time;
+	u16    res_date;
+	u32    res_size;
+	char   res_name[13];
 } findstate;
 #pragma pack(pop)
 
@@ -249,9 +249,9 @@ void f2f_getdta(iregs __far *r) {
 /* --- 36h: free space of drive DL (0=default, 1=A:, 3=C:).
  * AX=secs/clus BX=free CX=512 DX=total; AX=FFFF bad drive --- */
 void f36_freespace(iregs __far *r) {
-	u16 cl;
+	clus_t cl;
 	u16 free_cnt = 0;
-	u16 maxcl;
+	clus_t maxcl;
 	u8  dl = (u8)(r->dx & 0xFF);
 	u8  drv = dl == 0 ? fat_default_drive() : (u8)(dl - 1);
 	if (fat_select(drv) != 0) {
@@ -355,7 +355,7 @@ static int handle_alloc(fhandle **out) {
  * its sharing mode conflicts with a new open using newmode
  * (full AL). newmode 0xFF = any open entry conflicts (create
  * truncating, delete, rename paths). */
-static int share_conflict(u8 drv, u16 dcl, u16 idx, u8 newmode) {
+static int share_conflict(u8 drv, clus_t dcl, u16 idx, u8 newmode) {
 	u16 s;
 	for (s = 0; s < NUM_SFT; s++) {
 		if (sft[s].open == 0 || sft[s].dev != DEV_FILE) {
@@ -377,7 +377,7 @@ static int share_conflict(u8 drv, u16 dcl, u16 idx, u8 newmode) {
  * full open AL: access bits 0-2, sharing mode bits 4-6. */
 static int open_core(const char __far *path, u8 mode) {
 	u8       name11[11];
-	u16      dir_cl;
+	clus_t   dir_cl;
 	u16      err;
 	u16      idx;
 	dirent83 e;
@@ -416,8 +416,8 @@ static int open_core(const char __far *path, u8 mode) {
 	if (dev == DEV_FILE) {
 		f->dir_cluster = dir_cl;
 		f->dir_index = idx;
-		f->first_cluster = e.cluster;
-		f->cur_cluster = e.cluster;
+		f->first_cluster = dirent_cluster(&e);
+		f->cur_cluster = dirent_cluster(&e);
 		f->size = e.size;
 		f->ftime = e.time;
 		f->fdate = e.date;
@@ -430,7 +430,7 @@ static int open_core(const char __far *path, u8 mode) {
  * With fail_exists (5Bh) an existing file is an error. */
 static int create_core(const char __far *path, u8 attr, u8 fail_exists) {
 	u8       name11[11];
-	u16      dir_cl;
+	clus_t   dir_cl;
 	u16      err;
 	u16      idx;
 	dirent83 e;
@@ -467,8 +467,8 @@ static int create_core(const char __far *path, u8 attr, u8 fail_exists) {
 		if (share_conflict(fat_cur_drive(), dir_cl, idx, 0xFF)) {
 			return -(int)ERR_SHARING_VIOLATION; /* open file: no truncate */
 		}
-		if (e.cluster != 0) {
-			fat_free_chain(e.cluster);
+		if (dirent_cluster(&e) != 0) {
+			fat_free_chain(dirent_cluster(&e));
 		}
 	} else {
 		if (fat_dir_alloc_slot(dir_cl, &idx) != 0) {
@@ -478,7 +478,7 @@ static int create_core(const char __far *path, u8 attr, u8 fail_exists) {
 		fmemcpy(e.name, name11, 11);
 	}
 	e.attr = attr;
-	e.cluster = 0;
+	dirent_set_cluster(&e, 0);
 	e.size = 0;
 	e.time = clock_dos_time();
 	e.date = clock_dos_date();
@@ -541,7 +541,7 @@ static void file_flush(fhandle *f) {
 	}
 	fat_select(f->drv);
 	if (fat_dir_entry(f->dir_cluster, f->dir_index, &e) == 0) {
-		e.cluster = f->first_cluster;
+		dirent_set_cluster(&e, f->first_cluster);
 		e.size = f->size;
 		e.time = f->ftime;
 		e.date = f->fdate;
@@ -712,8 +712,8 @@ static u16 file_do_read(fhandle *f, u8 __far *dst, u16 count) {
 		f->cur_cluster_pos = 0;
 	}
 	while (f->cur_cluster_pos + cb <= f->pos) { /* seeked forwards */
-		u16 nx = fat_next(f->cur_cluster);
-		if (nx == 0xFFFF) {
+		clus_t nx = fat_next(f->cur_cluster);
+		if (nx == CLUS_EOC) {
 			return done;
 		}
 		f->cur_cluster = nx;
@@ -735,8 +735,8 @@ static u16 file_do_read(fhandle *f, u8 __far *dst, u16 count) {
 		f->pos += n;
 		done += n;
 		if (f->pos - f->cur_cluster_pos >= cb && done < count) {
-			u16 nx = fat_next(f->cur_cluster);
-			if (nx == 0xFFFF) {
+			clus_t nx = fat_next(f->cur_cluster);
+			if (nx == CLUS_EOC) {
 				break;
 			}
 			f->cur_cluster = nx;
@@ -785,7 +785,7 @@ static u16 file_do_write(fhandle *f, const u8 __far *src, u16 count) {
 	fat_select(f->drv);
 	cb = fat_cluster_bytes();
 	if (f->first_cluster == 0) { /* fresh/truncated file */
-		u16 cl = fat_alloc(0);
+		clus_t cl = fat_alloc(0);
 		if (cl == 0) {
 			return 0; /* disk full */
 		}
@@ -799,8 +799,8 @@ static u16 file_do_write(fhandle *f, const u8 __far *src, u16 count) {
 		f->cur_cluster_pos = 0;
 	}
 	while (f->cur_cluster_pos + cb <= f->pos) {
-		u16 nx = fat_next(f->cur_cluster);
-		if (nx == 0xFFFF) { /* extend chain (seek past EOF) */
+		clus_t nx = fat_next(f->cur_cluster);
+		if (nx == CLUS_EOC) { /* extend chain (seek past EOF) */
 			nx = fat_alloc(f->cur_cluster);
 			if (nx == 0) {
 				return 0;
@@ -833,8 +833,8 @@ static u16 file_do_write(fhandle *f, const u8 __far *src, u16 count) {
 			f->dirty = 1;
 		}
 		if (f->pos - f->cur_cluster_pos >= cb && done < count) {
-			u16 nx = fat_next(f->cur_cluster);
-			if (nx == 0xFFFF) {
+			clus_t nx = fat_next(f->cur_cluster);
+			if (nx == CLUS_EOC) {
 				nx = fat_alloc(f->cur_cluster);
 				if (nx == 0) {
 					break;
@@ -868,19 +868,19 @@ static void file_truncate(fhandle *f) {
 			f->first_cluster = 0;
 		}
 	} else {
-		u16 keep = (u16)((f->pos + cb - 1) / cb); /* clusters kept */
-		u16 cl = f->first_cluster;
-		u16 i, nx;
+		clus_t keep = (clus_t)((f->pos + cb - 1) / cb); /* clusters kept */
+		clus_t cl = f->first_cluster;
+		clus_t i, nx;
 		for (i = 1; i < keep; i++) {
 			nx = fat_next(cl);
-			if (nx == 0xFFFF) {
+			if (nx == CLUS_EOC) {
 				break;
 			}
 			cl = nx;
 		}
 		nx = fat_next(cl);
-		fat_set(cl, 0xFFFF);
-		if (nx >= 2 && nx != 0xFFFF) {
+		fat_set(cl, CLUS_EOC);
+		if (nx >= 2 && nx != CLUS_EOC) {
 			fat_free_chain(nx);
 		}
 	}
@@ -968,7 +968,8 @@ void f42_seek(iregs __far *r) {
 /* --- 43h: get (AL=0) / set (AL=1) attributes of DS:DX --- */
 void f43_attrib(iregs __far *r) {
 	u8       name11[11];
-	u16      dir_cl, idx, err;
+	clus_t   dir_cl;
+	u16      idx, err;
 	dirent83 e;
 	u8       sub = (u8)(r->ax & 0xFF);
 	err = fat_resolve_dir((const char __far *)MK_FP(r->ds, r->dx), &dir_cl,
@@ -1109,7 +1110,8 @@ void f68_commit(iregs __far *r) {
 
 u16 file_unlink_path(const char __far *path) {
 	u8       name11[11];
-	u16      dir_cl, idx, err;
+	clus_t   dir_cl;
+	u16      idx, err;
 	dirent83 e;
 	err = fat_resolve_dir(path, &dir_cl, name11);
 	if (err != 0) {
@@ -1124,8 +1126,8 @@ u16 file_unlink_path(const char __far *path) {
 	if ((e.attr & (ATTR_DIR | ATTR_READONLY)) != 0) {
 		return ERR_ACCESS_DENIED;
 	}
-	if (e.cluster != 0) {
-		fat_free_chain(e.cluster);
+	if (dirent_cluster(&e) != 0) {
+		fat_free_chain(dirent_cluster(&e));
 	}
 	e.name[0] = 0xE5;
 	if (fat_dir_set(dir_cl, idx, &e) != 0 || fat_commit() != 0) {
@@ -1136,7 +1138,8 @@ u16 file_unlink_path(const char __far *path) {
 
 u16 file_rename_path(const char __far *oldp, const char __far *newp) {
 	u8       old11[11], new11[11];
-	u16      odir, ndir, oidx, nidx, err;
+	clus_t   odir, ndir;
+	u16      oidx, nidx, err;
 	dirent83 e, probe;
 	err = fat_resolve_dir(oldp, &odir, old11);
 	if (err == 0) {
@@ -1170,10 +1173,10 @@ u16 file_rename_path(const char __far *oldp, const char __far *newp) {
 	}
 	if ((e.attr & ATTR_DIR) != 0) { /* fix ".." of moved dir */
 		dirent83 dd;
-		if (fat_dir_entry(e.cluster, 1, &dd) == 0 && dd.name[0] == '.' &&
+		if (fat_dir_entry(dirent_cluster(&e), 1, &dd) == 0 && dd.name[0] == '.' &&
 		    dd.name[1] == '.') {
-			dd.cluster = ndir;
-			fat_dir_set(e.cluster, 1, &dd);
+			dirent_set_cluster(&dd, ndir);
+			fat_dir_set(dirent_cluster(&e), 1, &dd);
 		}
 	}
 	e.name[0] = 0xE5; /* drop the old entry */
@@ -1203,7 +1206,8 @@ void f56_rename(iregs __far *r) {
 /* --- 39h: create directory at DS:DX --- */
 void f39_mkdir(iregs __far *r) {
 	u8       name11[11];
-	u16      dir_cl, idx, err, cl;
+	clus_t   dir_cl, cl;
+	u16      idx, err;
 	dirent83 e;
 	err = fat_resolve_dir((const char __far *)MK_FP(r->ds, r->dx), &dir_cl,
 	                      name11);
@@ -1234,19 +1238,19 @@ void f39_mkdir(iregs __far *r) {
 	e.attr = ATTR_DIR;
 	e.time = clock_dos_time();
 	e.date = clock_dos_date();
-	e.cluster = cl;
+	dirent_set_cluster(&e, cl);
 	if (fat_dir_set(cl, 0, &e) != 0) {
 		int21_error(r, ERR_ACCESS_DENIED);
 		return;
 	}
-	e.name[1] = '.';    /* ".." entry */
-	e.cluster = dir_cl; /* 0 = root, per spec */
+	e.name[1] = '.';                  /* ".." entry */
+	dirent_set_cluster(&e, dir_cl); /* 0 = root, per spec */
 	if (fat_dir_set(cl, 1, &e) != 0) {
 		int21_error(r, ERR_ACCESS_DENIED);
 		return;
 	}
 	fmemcpy(e.name, name11, 11); /* parent entry */
-	e.cluster = cl;
+	dirent_set_cluster(&e, cl);
 	if (fat_dir_set(dir_cl, idx, &e) != 0 || fat_commit() != 0) {
 		int21_error(r, ERR_ACCESS_DENIED);
 	}
@@ -1255,7 +1259,8 @@ void f39_mkdir(iregs __far *r) {
 /* --- 3Ah: remove empty directory at DS:DX --- */
 void f3a_rmdir(iregs __far *r) {
 	u8       name11[11];
-	u16      dir_cl, idx, err, i;
+	clus_t   dir_cl;
+	u16      idx, err, i;
 	dirent83 e, scan;
 	err = fat_resolve_dir((const char __far *)MK_FP(r->ds, r->dx), &dir_cl,
 	                      name11);
@@ -1275,11 +1280,11 @@ void f3a_rmdir(iregs __far *r) {
 		int21_error(r, ERR_ACCESS_DENIED);
 		return;
 	}
-	if (e.cluster == fat_cwd_cluster()) {
+	if (dirent_cluster(&e) == fat_cwd_cluster()) {
 		int21_error(r, ERR_CURRENT_DIR);
 		return;
 	}
-	for (i = 2; fat_dir_entry(e.cluster, i, &scan) == 0; i++) {
+	for (i = 2; fat_dir_entry(dirent_cluster(&e), i, &scan) == 0; i++) {
 		if (scan.name[0] == 0x00) {
 			break;
 		}
@@ -1288,7 +1293,7 @@ void f3a_rmdir(iregs __far *r) {
 			return;
 		}
 	}
-	fat_free_chain(e.cluster);
+	fat_free_chain(dirent_cluster(&e));
 	e.name[0] = 0xE5;
 	if (fat_dir_set(dir_cl, idx, &e) != 0 || fat_commit() != 0) {
 		int21_error(r, ERR_ACCESS_DENIED);
@@ -1358,7 +1363,7 @@ static void find_continue(iregs __far *r, findstate __far *fs) {
 void f4e_findfirst(iregs __far *r) {
 	findstate __far *fs = (findstate __far *)MK_FP(dta_seg, dta_off);
 	u8               name11[11];
-	u16              dir_cl;
+	clus_t           dir_cl;
 	u16              err;
 	err = fat_resolve_dir((const char __far *)MK_FP(r->ds, r->dx), &dir_cl,
 	                      name11);

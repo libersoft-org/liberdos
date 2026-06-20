@@ -374,7 +374,8 @@ static void fcb_find(iregs __far *r, u8 first) {
 	u8        attr;
 	u8 __far *f = fcb_at(r, &attr);
 	u8        pat[11];
-	u16       idx, dir_cl;
+	u16       idx;
+	clus_t    dir_cl;
 	dirent83  e;
 	u16       dseg, doff;
 	u16       i;
@@ -454,7 +455,7 @@ void f13_fcb_delete(iregs __far *r) {
 	u8 __far *f = fcb_at(r, &attr);
 	u8        pat[11];
 	u16       idx = 0;
-	u16       dir_cl;
+	clus_t    dir_cl;
 	dirent83  e;
 	u8        any = 0;
 	u16       i;
@@ -480,8 +481,8 @@ void f13_fcb_delete(iregs __far *r) {
 		if (e.name[0] != 0xE5 && e.attr != 0x0F &&
 		    (e.attr & (ATTR_VOLUME | ATTR_DIR | ATTR_READONLY)) == 0 &&
 		    fat_match11(pat, e.name)) {
-			if (e.cluster != 0) {
-				fat_free_chain(e.cluster);
+			if (dirent_cluster(&e) != 0) {
+				fat_free_chain(dirent_cluster(&e));
 			}
 			e.name[0] = 0xE5;
 			fat_dir_set(dir_cl, idx, &e);
@@ -500,7 +501,7 @@ void f17_fcb_rename(iregs __far *r) {
 	u8 __far *f = fcb_at(r, &attr);
 	u8        pat[11], newp[11];
 	u16       idx = 0;
-	u16       dir_cl;
+	clus_t    dir_cl;
 	dirent83  e, probe;
 	u8        any = 0;
 	u16       i;

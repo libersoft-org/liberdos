@@ -29,21 +29,24 @@ static u32 buf_lba = 0xFFFFFFFFUL;
 static u8  buf_drv = 0xFF;
 
 typedef struct volume {
-	u8   present;
-	u8   bios_drive;
-	u8   fat16;
-	u8   secs_per_clus;
-	u8   num_fats;
-	u16  root_entries;
-	u16  secs_per_fat;
-	u32  base_lba;   /* volume start (partition or 0) */
-	u32  total_secs; /* volume size in sectors */
-	u32  fat_lba;    /* absolute LBA of the first FAT */
-	u32  root_lba;
-	u32  data_lba;
-	u16  max_cluster; /* highest valid cluster number */
-	u16  cwd_cluster; /* 0 = root */
-	char cwd[64];     /* canonical, no leading backslash */
+	u8     present;
+	u8     bios_drive;
+	u8     fat16;
+	u8     fat32; /* FAT32 volume (root is a cluster chain) */
+	u8     secs_per_clus;
+	u8     num_fats;
+	u16    root_entries;
+	u16    secs_per_fat;   /* BPB_FATSz16 (0 for FAT32) */
+	u32    secs_per_fat32; /* BPB_FATSz32 */
+	u32    base_lba;       /* volume start (partition or 0) */
+	u32    total_secs;     /* volume size in sectors */
+	u32    fat_lba;        /* absolute LBA of the first FAT */
+	u32    root_lba;       /* FAT12/16 fixed root (unused for FAT32) */
+	u32    data_lba;
+	clus_t root_cluster; /* FAT32 root dir cluster (BPB_RootClus) */
+	clus_t max_cluster;  /* highest valid cluster number */
+	clus_t cwd_cluster;  /* 0 = root */
+	char   cwd[64];      /* canonical, no leading backslash */
 } volume;
 
 #define NUM_DRIVES 3 /* A:, B: (unused), C: */
@@ -149,16 +152,24 @@ int fat_write_ext(u32 lba, const void __far *buf) {
 	return 0;
 }
 
-/* --- FAT16 sector cache --- */
+/* --- FAT16/FAT32 sector cache --- */
+
+/* FAT size in sectors for the given volume (FAT32 uses the
+ * 32-bit field). */
+static u32 vol_fatsz(volume *vol) {
+	return vol->fat32 ? vol->secs_per_fat32 : (u32)vol->secs_per_fat;
+}
 
 static int f16_flush(void) {
 	u16 f;
+	u32 fatsz;
 	if (!f16dirty || f16vol == 0) {
 		return 0;
 	}
+	fatsz = vol_fatsz(f16vol);
 	for (f = 0; f < f16vol->num_fats; f++) {
-		if (disk_write(f16vol->bios_drive,
-		               f16lba + (u32)f * f16vol->secs_per_fat, f16buf) != 0) {
+		if (disk_write(f16vol->bios_drive, f16lba + (u32)f * fatsz, f16buf) !=
+		    0) {
 			return -1;
 		}
 	}
@@ -184,38 +195,53 @@ static int f16_load(u32 lba) {
 
 /* --- FAT entry access (on the selected volume) --- */
 
-/* Next cluster after cl; end-of-chain/bad normalized to 0xFFFF. */
-u16 fat_next(u16 cl) {
-	if (v->fat16) {
+/* Next cluster after cl; end-of-chain/bad normalized to CLUS_EOC. */
+clus_t fat_next(clus_t cl) {
+	if (v->fat32) {
+		u32 val;
+		if (f16_load(v->fat_lba + (u32)(cl >> 7)) != 0) { /* 128 dwords/sec */
+			return CLUS_EOC;
+		}
+		val = *(u32 *)(f16buf + ((u16)(cl & 127) << 2)) & 0x0FFFFFFFUL;
+		return val >= 0x0FFFFFF8UL ? CLUS_EOC : val;
+	} else if (v->fat16) {
 		u16 val;
-		if (f16_load(v->fat_lba + (cl >> 8)) != 0) {
-			return 0xFFFF;
+		if (f16_load(v->fat_lba + (u32)(cl >> 8)) != 0) {
+			return CLUS_EOC;
 		}
 		val = *(u16 *)(f16buf + ((u16)(cl & 0xFF) << 1));
-		return val >= 0xFFF7 ? 0xFFFF : val;
+		return val >= 0xFFF7 ? CLUS_EOC : (clus_t)val;
 	} else {
 		u16 off = (u16)(cl + (cl >> 1));
 		u16 val = *(u16 *)(fatcache + off);
 		val = (cl & 1) ? (u16)(val >> 4) : (u16)(val & 0x0FFF);
-		return val >= 0xFF7 ? 0xFFFF : val;
+		return val >= 0xFF7 ? CLUS_EOC : (clus_t)val;
 	}
 }
 
-/* Set the FAT entry of cl. val = 0xFFFF writes end-of-chain. */
-void fat_set(u16 cl, u16 val) {
-	if (v->fat16) {
-		if (f16_load(v->fat_lba + (cl >> 8)) != 0) {
+/* Set the FAT entry of cl. val = CLUS_EOC writes end-of-chain. */
+void fat_set(clus_t cl, clus_t val) {
+	if (v->fat32) {
+		u32 *p;
+		if (f16_load(v->fat_lba + (u32)(cl >> 7)) != 0) {
 			return;
 		}
-		*(u16 *)(f16buf + ((u16)(cl & 0xFF) << 1)) = val;
+		p = (u32 *)(f16buf + ((u16)(cl & 127) << 2));
+		*p = (*p & 0xF0000000UL) | (val & 0x0FFFFFFFUL); /* keep top 4 bits */
+		f16dirty = 1;
+	} else if (v->fat16) {
+		if (f16_load(v->fat_lba + (u32)(cl >> 8)) != 0) {
+			return;
+		}
+		*(u16 *)(f16buf + ((u16)(cl & 0xFF) << 1)) = (u16)val;
 		f16dirty = 1;
 	} else {
 		u16 off = (u16)(cl + (cl >> 1));
 		u16 cur = *(u16 *)(fatcache + off);
 		if (cl & 1) {
-			cur = (u16)((cur & 0x000F) | (val << 4));
+			cur = (u16)((cur & 0x000F) | ((u16)val << 4));
 		} else {
-			cur = (u16)((cur & 0xF000) | (val & 0x0FFF));
+			cur = (u16)((cur & 0xF000) | ((u16)val & 0x0FFF));
 		}
 		*(u16 *)(fatcache + off) = cur;
 		fat12_dirty = 1;
@@ -224,11 +250,11 @@ void fat_set(u16 cl, u16 val) {
 
 /* Allocate a free cluster, mark it end-of-chain and link it
  * after prev (if prev != 0). Returns 0 when the disk is full. */
-u16 fat_alloc(u16 prev) {
-	u16 cl;
+clus_t fat_alloc(clus_t prev) {
+	clus_t cl;
 	for (cl = 2; cl <= v->max_cluster; cl++) {
 		if (fat_next(cl) == 0) {
-			fat_set(cl, 0xFFFF);
+			fat_set(cl, CLUS_EOC);
 			if (prev != 0) {
 				fat_set(prev, cl);
 			}
@@ -239,9 +265,9 @@ u16 fat_alloc(u16 prev) {
 }
 
 /* Free a whole cluster chain starting at cl. */
-void fat_free_chain(u16 cl) {
+void fat_free_chain(clus_t cl) {
 	while (cl >= 2 && cl <= v->max_cluster) {
-		u16 nx = fat_next(cl);
+		clus_t nx = fat_next(cl);
 		fat_set(cl, 0);
 		cl = nx;
 	}
@@ -272,11 +298,11 @@ u16 fat_cluster_bytes(void) {
 	return (u16)(v->secs_per_clus * 512u);
 }
 
-u32 fat_cluster_lba(u16 cl) {
+u32 fat_cluster_lba(clus_t cl) {
 	return v->data_lba + (u32)(cl - 2) * v->secs_per_clus;
 }
 
-u16 fat_max_cluster(void) {
+clus_t fat_max_cluster(void) {
 	return v->max_cluster;
 }
 
@@ -285,7 +311,7 @@ u8 fat_secs_per_clus(void) {
 }
 
 /* Zero every sector of a data cluster on disk. 0 = OK. */
-int fat_zero_cluster(u16 cl) {
+int fat_zero_cluster(clus_t cl) {
 	u16 s;
 	fmemset(disk_buf, 0, 512);
 	buf_lba = 0xFFFFFFFFUL;
@@ -303,7 +329,7 @@ int fat_zero_cluster(u16 cl) {
 static int mount_volume(u8 drv, u8 bios_drive, u32 part_lba) {
 	volume *m = &vols[drv];
 	u16     reserved, total16, i;
-	u32     total, data_rel, clusters;
+	u32     total, data_rel, clusters, fatsz;
 	u16     root_secs;
 
 	m->present = 0;
@@ -318,11 +344,17 @@ static int mount_volume(u8 drv, u8 bios_drive, u32 part_lba) {
 	m->root_entries = *(u16 *)(disk_buf + 17);
 	total16 = *(u16 *)(disk_buf + 19);
 	m->secs_per_fat = *(u16 *)(disk_buf + 22);
+	m->secs_per_fat32 = *(u32 *)(disk_buf + 0x24); /* BPB_FATSz32 */
+	m->root_cluster = *(u32 *)(disk_buf + 0x2C);   /* BPB_RootClus */
 	total = total16 != 0 ? (u32)total16 : *(u32 *)(disk_buf + 32);
 	if (bios_drive < 0x80) {
 		disk_set_geometry(*(u16 *)(disk_buf + 24), *(u16 *)(disk_buf + 26));
 	}
-	if (m->secs_per_clus == 0 || m->secs_per_fat == 0 || m->num_fats == 0 ||
+	/* FAT32: no fixed root (root_entries == 0), 32-bit FAT size. */
+	m->fat32 = (m->root_entries == 0 && m->secs_per_fat == 0 &&
+	            m->secs_per_fat32 != 0);
+	fatsz = m->fat32 ? m->secs_per_fat32 : (u32)m->secs_per_fat;
+	if (m->secs_per_clus == 0 || fatsz == 0 || m->num_fats == 0 ||
 	    total == 0) {
 		return -1;
 	}
@@ -330,15 +362,15 @@ static int mount_volume(u8 drv, u8 bios_drive, u32 part_lba) {
 	m->base_lba = part_lba;
 	m->total_secs = total;
 	m->fat_lba = part_lba + reserved;
-	m->root_lba = m->fat_lba + (u32)m->num_fats * m->secs_per_fat;
+	m->root_lba = m->fat_lba + (u32)m->num_fats * fatsz;
 	m->data_lba = m->root_lba + root_secs;
-	data_rel = (u32)reserved + (u32)m->num_fats * m->secs_per_fat + root_secs;
+	data_rel = (u32)reserved + (u32)m->num_fats * fatsz + root_secs;
 	clusters = (total - data_rel) / m->secs_per_clus;
-	m->max_cluster = (u16)(clusters + 1);
-	m->fat16 = clusters >= 4085;
+	m->max_cluster = clusters + 1;
+	m->fat16 = (!m->fat32 && clusters >= 4085);
 	m->cwd_cluster = 0;
 	m->cwd[0] = '\0';
-	if (!m->fat16) {
+	if (!m->fat16 && !m->fat32) {
 		if (v12 != 0 || m->secs_per_fat > 12) {
 			return -1; /* one cached FAT12 volume only */
 		}
@@ -378,7 +410,8 @@ int fat_mount_hdd(void) {
 	for (i = 0; i < 4; i++) {
 		const u8 *e = disk_buf + 0x1BE + i * 16;
 		u8        type = e[4];
-		if (type == 0x01 || type == 0x04 || type == 0x06 || type == 0x0E) {
+		if (type == 0x01 || type == 0x04 || type == 0x06 || type == 0x0E ||
+		    type == 0x0B || type == 0x0C) { /* incl. FAT32 (0B/0C) */
 			part_lba = *(const u32 *)(e + 8);
 			break;
 		}
@@ -397,20 +430,22 @@ int fat_mount_hdd(void) {
 }
 
 /* Compute the LBA holding directory entry #index. 0 = OK,
- * -1 = index past the end of the directory. */
-static int fat_dir_lba(u16 dir_cluster, u16 index, u32 *lba) {
+ * -1 = index past the end of the directory. dir_cluster 0 means
+ * the root: a fixed area on FAT12/16, the root_cluster chain on
+ * FAT32. */
+static int fat_dir_lba(clus_t dir_cluster, u16 index, u32 *lba) {
 	u16 sec_idx = (u16)(index >> 4); /* 16 entries / sector */
-	if (dir_cluster == 0) {
+	if (dir_cluster == 0 && !v->fat32) {
 		if (index >= v->root_entries) {
 			return -1;
 		}
 		*lba = v->root_lba + sec_idx;
 	} else {
-		u16 cl = dir_cluster;
-		u16 skip = sec_idx / v->secs_per_clus;
+		clus_t cl = (dir_cluster == 0) ? v->root_cluster : dir_cluster;
+		u16    skip = sec_idx / v->secs_per_clus;
 		while (skip != 0) {
 			cl = fat_next(cl);
-			if (cl == 0xFFFF) {
+			if (cl == CLUS_EOC) {
 				return -1;
 			}
 			skip--;
@@ -422,7 +457,7 @@ static int fat_dir_lba(u16 dir_cluster, u16 index, u32 *lba) {
 
 /* Fetch directory entry #index of the directory at dir_cluster
  * (0 = root). 0 = OK, -1 = index past the end of the directory. */
-int fat_dir_entry(u16 dir_cluster, u16 index, dirent83 *out) {
+int fat_dir_entry(clus_t dir_cluster, u16 index, dirent83 *out) {
 	u32 lba;
 	u16 byte_off = (u16)((index & 15) * 32);
 	if (fat_dir_lba(dir_cluster, index, &lba) != 0) {
@@ -436,7 +471,7 @@ int fat_dir_entry(u16 dir_cluster, u16 index, dirent83 *out) {
 }
 
 /* Write directory entry #index back to disk. 0 = OK. */
-int fat_dir_set(u16 dir_cluster, u16 index, const dirent83 *e) {
+int fat_dir_set(clus_t dir_cluster, u16 index, const dirent83 *e) {
 	u32 lba;
 	u16 byte_off = (u16)((index & 15) * 32);
 	if (fat_dir_lba(dir_cluster, index, &lba) != 0) {
@@ -450,12 +485,13 @@ int fat_dir_set(u16 dir_cluster, u16 index, const dirent83 *e) {
 }
 
 /* Append a zeroed cluster to the directory at dir_cluster
- * (must not be root). 0 = OK, -1 = disk full / I/O error. */
-static int fat_dir_extend(u16 dir_cluster) {
-	u16 last = dir_cluster;
-	u16 nx;
-	u16 fresh;
-	while ((nx = fat_next(last)) >= 2 && nx != 0xFFFF) {
+ * (dir_cluster 0 = the FAT32 root chain). 0 = OK, -1 = disk
+ * full / I/O error. */
+static int fat_dir_extend(clus_t dir_cluster) {
+	clus_t last = (dir_cluster == 0) ? v->root_cluster : dir_cluster;
+	clus_t nx;
+	clus_t fresh;
+	while ((nx = fat_next(last)) >= 2 && nx != CLUS_EOC) {
 		last = nx;
 	}
 	fresh = fat_alloc(last);
@@ -467,13 +503,13 @@ static int fat_dir_extend(u16 dir_cluster) {
 
 /* Find a free directory slot (deleted or end-of-dir entry),
  * growing subdirectories when needed. 0 = OK, -1 = full. */
-int fat_dir_alloc_slot(u16 dir_cluster, u16 *out_index) {
+int fat_dir_alloc_slot(clus_t dir_cluster, u16 *out_index) {
 	u16      i = 0;
 	dirent83 e;
 	for (;;) {
 		if (fat_dir_entry(dir_cluster, i, &e) != 0) {
-			if (dir_cluster == 0) {
-				return -1; /* root directory is full */
+			if (dir_cluster == 0 && !v->fat32) {
+				return -1; /* FAT12/16 root directory is fixed */
 			}
 			if (fat_dir_extend(dir_cluster) != 0) {
 				return -1;
@@ -502,7 +538,7 @@ int fat_match11(const u8 *pat, const u8 *name) {
 /* Find name11 in the directory at dir_cluster. Skips deleted,
  * LFN and volume-label entries. 0 = found, -1 = not found.
  * The entry index is stored in *out_index for write-backs. */
-int fat_dir_search_i(u16 dir_cluster, const u8 *name11, dirent83 *out,
+int fat_dir_search_i(clus_t dir_cluster, const u8 *name11, dirent83 *out,
                      u16 *out_index) {
 	u16      i = 0;
 	dirent83 e;
@@ -521,9 +557,24 @@ int fat_dir_search_i(u16 dir_cluster, const u8 *name11, dirent83 *out,
 	return -1;
 }
 
-int fat_dir_search(u16 dir_cluster, const u8 *name11, dirent83 *out) {
+int fat_dir_search(clus_t dir_cluster, const u8 *name11, dirent83 *out) {
 	u16 idx;
 	return fat_dir_search_i(dir_cluster, name11, out, &idx);
+}
+
+/* Combine the split first-cluster field (hi:lo) of a directory
+ * entry; high bits only count on FAT32. */
+clus_t dirent_cluster(const dirent83 *e) {
+	if (v->fat32) {
+		return ((clus_t)e->cluster_hi << 16) | e->cluster;
+	}
+	return e->cluster;
+}
+
+/* Store a cluster number into a directory entry's split field. */
+void dirent_set_cluster(dirent83 *e, clus_t cl) {
+	e->cluster = (u16)cl;
+	e->cluster_hi = v->fat32 ? (u16)(cl >> 16) : 0;
 }
 
 /* ============================================================
@@ -558,7 +609,7 @@ u8 fat_lfn_checksum(const u8 *name11) {
  * advances *index past the 8.3 entry. Deleted and orphaned
  * slots are skipped. 1 = entry, 0 = end of directory, -1 = I/O
  * error (folded into 0 here: callers stop on non-positive). */
-int fat_dir_next_lfn(u16 dir_cluster, u16 *index, dirent83 *out83,
+int fat_dir_next_lfn(clus_t dir_cluster, u16 *index, dirent83 *out83,
                      char *longname, u16 lmax) {
 	static u8 buf[260];     /* assembled name, by ordinal slot */
 	u16       i = *index;
@@ -701,7 +752,7 @@ int fat_is_short_name(const char *name, u8 *out11) {
 
 /* Generate a unique 8.3 alias (BASE~N.EXT) for a long name in
  * dir_cluster, avoiding collisions with existing entries. */
-void fat_make_shortname(u16 dir_cluster, const char *longname, u8 *out11) {
+void fat_make_shortname(clus_t dir_cluster, const char *longname, u8 *out11) {
 	u8       base[8], ext[3];
 	u16      bl = 0, el = 0, len = 0, i, n;
 	int      dot = -1;
@@ -773,7 +824,7 @@ void fat_make_shortname(u16 dir_cluster, const char *longname, u8 *out11) {
 /* Find a contiguous run of count free directory slots (deleted
  * or end-of-directory), growing subdirectories as needed.
  * 0 = OK (*first = first slot index), -1 = directory full. */
-int fat_dir_alloc_run(u16 dir_cluster, u16 count, u16 *first) {
+int fat_dir_alloc_run(clus_t dir_cluster, u16 count, u16 *first) {
 	u16      i = 0, run = 0, start = 0;
 	dirent83 e;
 	for (;;) {
@@ -806,7 +857,7 @@ int fat_dir_alloc_run(u16 dir_cluster, u16 count, u16 *first) {
  * trailing 8.3 entry, write the slots (checksummed against
  * short11), and return in *short_index where the caller must
  * write the 8.3 entry. Does not commit. 0 = OK, -1 = full. */
-int fat_alloc_lfn_entry(u16 dir_cluster, const char *longname,
+int fat_alloc_lfn_entry(clus_t dir_cluster, const char *longname,
                         const u8 *short11, u16 *short_index) {
 	u16 len = 0, nslots, first, i;
 	u8  sum;
@@ -855,7 +906,7 @@ int fat_alloc_lfn_entry(u16 dir_cluster, const char *longname,
 
 /* Mark the long-name slots immediately preceding short_index as
  * deleted (0xE5). Stops at the first non-LFN / free entry. */
-void fat_delete_lfn_slots(u16 dir_cluster, u16 short_index) {
+void fat_delete_lfn_slots(clus_t dir_cluster, u16 short_index) {
 	dirent83 e;
 	u16      i = short_index;
 	while (i > 0) {
@@ -971,8 +1022,8 @@ static u16 select_by_prefix(const char __far **pp) {
  * containing directory's cluster in *dir_cl and the final
  * component (may contain '?') in last11. Leaves the path's
  * volume selected. 0 = OK or DOS error. */
-u16 fat_resolve_dir(const char __far *path, u16 *dir_cl, u8 *last11) {
-	u16               cl;
+u16 fat_resolve_dir(const char __far *path, clus_t *dir_cl, u8 *last11) {
+	clus_t            cl;
 	u8                comp[11];
 	const char __far *p = path;
 	dirent83          e;
@@ -1009,7 +1060,7 @@ u16 fat_resolve_dir(const char __far *path, u16 *dir_cl, u8 *last11) {
 		if ((e.attr & ATTR_DIR) == 0) {
 			return ERR_PATH_NOT_FOUND;
 		}
-		cl = e.cluster; /* ".." stores 0 for root - works */
+		cl = dirent_cluster(&e); /* ".." stores 0 for root - works */
 	}
 }
 
@@ -1019,7 +1070,7 @@ u16 fat_resolve_dir(const char __far *path, u16 *dir_cl, u8 *last11) {
 u16 fat_chdir(const char __far *path) {
 	char              newpath[64];
 	u16               np = 0;
-	u16               cl;
+	clus_t            cl;
 	u16               i;
 	const char __far *p = path;
 	u8                comp[11];
@@ -1056,7 +1107,7 @@ u16 fat_chdir(const char __far *path) {
 			if (fat_dir_search(cl, comp, &e) != 0) {
 				return ERR_PATH_NOT_FOUND;
 			}
-			cl = e.cluster;
+			cl = dirent_cluster(&e);
 			while (np > 0 && newpath[np - 1] != '\\') {
 				np--; /* pop last component text */
 			}
@@ -1071,7 +1122,7 @@ u16 fat_chdir(const char __far *path) {
 		if ((e.attr & ATTR_DIR) == 0) {
 			return ERR_PATH_NOT_FOUND;
 		}
-		cl = e.cluster;
+		cl = dirent_cluster(&e);
 		if (np > 0 && np < 63) {
 			newpath[np++] = '\\';
 		}
@@ -1107,8 +1158,19 @@ const char *fat_get_cwd(u8 drv) {
 	return vols[drv].cwd;
 }
 
-u16 fat_cwd_cluster(void) {
+clus_t fat_cwd_cluster(void) {
 	return v->cwd_cluster;
+}
+
+/* FAT type name of a drive (0 = A:), for boot diagnostics. */
+const char *fat_type_name(u8 drv) {
+	if (drv >= NUM_DRIVES || !vols[drv].present) {
+		return "?";
+	}
+	if (vols[drv].fat32) {
+		return "FAT32";
+	}
+	return vols[drv].fat16 ? "FAT16" : "FAT12";
 }
 
 /* --- INT 25h/26h: absolute disk read/write ---

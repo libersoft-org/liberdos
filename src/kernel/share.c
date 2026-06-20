@@ -18,18 +18,18 @@
 #define MAX_LOCKS 32
 
 typedef struct lockent {
-	u8  used;
-	u8  drv; /* file identity: volume + dirent location */
-	u16 dir_cluster;
-	u16 dir_index;
-	u16 psp; /* owner */
-	u32 start;
-	u32 len;
+	u8     used;
+	u8     drv; /* file identity: volume + dirent location */
+	clus_t dir_cluster;
+	u16    dir_index;
+	u16    psp; /* owner */
+	u32    start;
+	u32    len;
 } lockent;
 
 static lockent locks[MAX_LOCKS];
 
-static int same_file(const lockent *l, u8 drv, u16 dcl, u16 idx) {
+static int same_file(const lockent *l, u8 drv, clus_t dcl, u16 idx) {
 	return l->drv == drv && l->dir_cluster == dcl && l->dir_index == idx;
 }
 
@@ -39,7 +39,7 @@ static int ranges_overlap(u32 s1, u32 l1, u32 s2, u32 l2) {
 
 /* Lock a region. Any overlap with an existing lock on the same
  * file - even our own - is a violation, like DOS. */
-u16 share_lock(u8 drv, u16 dcl, u16 idx, u16 psp, u32 start, u32 len) {
+u16 share_lock(u8 drv, clus_t dcl, u16 idx, u16 psp, u32 start, u32 len) {
 	int i;
 	int slot = -1;
 	if (len == 0) {
@@ -69,7 +69,7 @@ u16 share_lock(u8 drv, u16 dcl, u16 idx, u16 psp, u32 start, u32 len) {
 }
 
 /* Unlock: the region must exactly match a lock we own. */
-u16 share_unlock(u8 drv, u16 dcl, u16 idx, u16 psp, u32 start, u32 len) {
+u16 share_unlock(u8 drv, clus_t dcl, u16 idx, u16 psp, u32 start, u32 len) {
 	int i;
 	for (i = 0; i < MAX_LOCKS; i++) {
 		if (locks[i].used && locks[i].psp == psp &&
@@ -84,7 +84,7 @@ u16 share_unlock(u8 drv, u16 dcl, u16 idx, u16 psp, u32 start, u32 len) {
 
 /* Read/write into a region locked by another process is a lock
  * violation; our own locks never block us. */
-u16 share_io_check(u8 drv, u16 dcl, u16 idx, u16 psp, u32 start, u32 len) {
+u16 share_io_check(u8 drv, clus_t dcl, u16 idx, u16 psp, u32 start, u32 len) {
 	int i;
 	if (len == 0) {
 		return 0;
@@ -100,7 +100,7 @@ u16 share_io_check(u8 drv, u16 dcl, u16 idx, u16 psp, u32 start, u32 len) {
 }
 
 /* Last reference to the file went away: drop its locks. */
-void share_file_closed(u8 drv, u16 dcl, u16 idx) {
+void share_file_closed(u8 drv, clus_t dcl, u16 idx) {
 	int i;
 	for (i = 0; i < MAX_LOCKS; i++) {
 		if (locks[i].used && same_file(&locks[i], drv, dcl, idx)) {

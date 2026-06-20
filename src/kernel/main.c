@@ -197,7 +197,9 @@ void __cdecl kernel_main(u16 boot_drive) {
 	}
 	hdd_mb = fat_mount_hdd();
 	if (hdd_mb >= 0) {
-		con_puts("[disk] C: FAT16 ");
+		con_puts("[disk] C: ");
+		con_puts(fat_type_name(2));
+		con_puts(" ");
 		con_put_dec((u16)hdd_mb);
 		con_puts(" MB\r\n");
 	}

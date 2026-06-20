@@ -12,6 +12,15 @@ typedef unsigned char  u8;
 typedef unsigned short u16;
 typedef unsigned long  u32;
 
+/* FAT cluster number. 16 bits suffice for FAT12/16, but FAT32
+ * uses 28-bit clusters, so cluster numbers are 32-bit kernel-
+ * wide. Directory entry/slot indices stay u16. */
+typedef u32 clus_t;
+
+/* Normalized end-of-chain marker returned by fat_next and
+ * accepted by fat_set (masked per FAT width on write). */
+#define CLUS_EOC 0xFFFFFFFFUL
+
 /* Segment the kernel relocates itself to right after boot. The
  * kernel now runs in the HMA (0xFFFF:0x10+ = phys 0x100000),
  * freeing conventional memory; KERNEL_SEG is kept only for
@@ -25,7 +34,12 @@ typedef unsigned long  u32;
  * the HMA - the signature must live below 1 MB where clients
  * look for it. The arena starts just above the stub. */
 #define EMS_STUB_SEG   0x0060
-#define CONV_ARENA_SEG 0x0062
+/* Low (below 1 MB) bounce area for HDD BIOS transfers: a 512-byte
+ * sector buffer plus the EDD disk-address packet. The BIOS EDD
+ * interface (and SeaBIOS) cannot reliably read the DAP or fill
+ * the buffer in the HMA, so HDD I/O is staged through here. */
+#define DISK_LOW_SEG   0x0062
+#define CONV_ARENA_SEG 0x0084
 
 /* Build a far pointer from segment:offset. NOTE: do not use with a
  * constant segment of 0 - Watcom treats such pointers as null-based
@@ -108,10 +122,11 @@ typedef struct iregs {
 typedef struct dirent83 {
 	u8  name[11];
 	u8  attr;
-	u8  reserved[10];
-	u16 time; /* last write time */
-	u16 date; /* last write date */
-	u16 cluster;
+	u8  reserved[8];
+	u16 cluster_hi; /* DIR_FstClusHI (0x14): high 16 bits (FAT32) */
+	u16 time;       /* last write time */
+	u16 date;       /* last write date */
+	u16 cluster;    /* DIR_FstClusLO: low 16 bits of first cluster */
 	u32 size;
 } dirent83;
 #pragma pack(pop)
@@ -192,36 +207,40 @@ u8           fat_drive_count(void);
 int          fat_drive_info(u8 drv, u16 *spc, u16 *clusters, u8 *media);
 int          fat_load_sector(u32 lba);
 int          fat_store_buf(u32 lba);
-u16          fat_next(u16 cl);         /* end-of-chain -> 0xFFFF */
-void         fat_set(u16 cl, u16 val); /* val 0xFFFF = end-of-chain */
-u16          fat_alloc(u16 prev);
-void         fat_free_chain(u16 cl);
+clus_t       fat_next(clus_t cl);          /* end-of-chain -> 0xFFFFFFFF */
+void         fat_set(clus_t cl, clus_t val); /* val EOC = 0xFFFFFFFF */
+clus_t       fat_alloc(clus_t prev);
+void         fat_free_chain(clus_t cl);
 int          fat_commit(void);
 u16          fat_cluster_bytes(void);
-u32          fat_cluster_lba(u16 cl);
-u16          fat_max_cluster(void);
+u32          fat_cluster_lba(clus_t cl);
+clus_t       fat_max_cluster(void);
 u8           fat_secs_per_clus(void);
-int          fat_zero_cluster(u16 cl);
-int          fat_dir_entry(u16 dir_cluster, u16 index, dirent83 *out);
-int          fat_dir_set(u16 dir_cluster, u16 index, const dirent83 *e);
-int          fat_dir_alloc_slot(u16 dir_cluster, u16 *out_index);
+int          fat_zero_cluster(clus_t cl);
+clus_t       dirent_cluster(const dirent83 *e);          /* hi:lo -> clus */
+void         dirent_set_cluster(dirent83 *e, clus_t cl); /* clus -> hi:lo */
+int          fat_dir_entry(clus_t dir_cluster, u16 index, dirent83 *out);
+int          fat_dir_set(clus_t dir_cluster, u16 index, const dirent83 *e);
+int          fat_dir_alloc_slot(clus_t dir_cluster, u16 *out_index);
 int          fat_match11(const u8 *pat, const u8 *name);
-int          fat_dir_search(u16 dir_cluster, const u8 *name11, dirent83 *out);
-int          fat_dir_search_i(u16 dir_cluster, const u8 *name11, dirent83 *out,
+int          fat_dir_search(clus_t dir_cluster, const u8 *name11, dirent83 *out);
+int          fat_dir_search_i(clus_t dir_cluster, const u8 *name11, dirent83 *out,
                               u16 *out_index);
-u16          fat_resolve_dir(const char __far *path, u16 *dir_cl, u8 *last11);
+u16          fat_resolve_dir(const char __far *path, clus_t *dir_cl, u8 *last11);
 u16          fat_chdir(const char __far *path);
 const char  *fat_get_cwd(u8 drv);
-u16          fat_cwd_cluster(void);
+clus_t       fat_cwd_cluster(void);
+const char  *fat_type_name(u8 drv); /* "FAT12"/"FAT16"/"FAT32" */
 u8           fat_lfn_checksum(const u8 *name11); /* 8.3 -> VFAT checksum */
-int          fat_dir_next_lfn(u16 dir_cluster, u16 *index, dirent83 *out83,
+int          fat_dir_next_lfn(clus_t dir_cluster, u16 *index, dirent83 *out83,
                               char *longname, u16 lmax);
 int          fat_is_short_name(const char *name, u8 *out11);
-void         fat_make_shortname(u16 dir_cluster, const char *longname, u8 *out11);
-int          fat_dir_alloc_run(u16 dir_cluster, u16 count, u16 *first);
-int          fat_alloc_lfn_entry(u16 dir_cluster, const char *longname,
+void         fat_make_shortname(clus_t dir_cluster, const char *longname,
+                               u8 *out11);
+int          fat_dir_alloc_run(clus_t dir_cluster, u16 count, u16 *first);
+int          fat_alloc_lfn_entry(clus_t dir_cluster, const char *longname,
                                  const u8 *short11, u16 *short_index);
-void         fat_delete_lfn_slots(u16 dir_cluster, u16 short_index);
+void         fat_delete_lfn_slots(clus_t dir_cluster, u16 short_index);
 void __cdecl absdisk_dispatch(iregs __far *r); /* INT 25h/26h core */
 extern u8    absdisk_cf; /* status for the stub's live CF */
 
@@ -263,10 +282,10 @@ extern setver_entry setver_table[SETVER_MAX];
 void                setver_apply(u16 psp, const char __far *path);
 
 /* --- share.c: built-in SHARE (locks + sharing modes) --- */
-u16  share_lock(u8 drv, u16 dcl, u16 idx, u16 psp, u32 start, u32 len);
-u16  share_unlock(u8 drv, u16 dcl, u16 idx, u16 psp, u32 start, u32 len);
-u16  share_io_check(u8 drv, u16 dcl, u16 idx, u16 psp, u32 start, u32 len);
-void share_file_closed(u8 drv, u16 dcl, u16 idx);
+u16  share_lock(u8 drv, clus_t dcl, u16 idx, u16 psp, u32 start, u32 len);
+u16  share_unlock(u8 drv, clus_t dcl, u16 idx, u16 psp, u32 start, u32 len);
+u16  share_io_check(u8 drv, clus_t dcl, u16 idx, u16 psp, u32 start, u32 len);
+void share_file_closed(u8 drv, clus_t dcl, u16 idx);
 void share_psp_closed(u16 psp);
 int  share_mode_compat(u8 existing, u8 newmode);
 void f5c_lock(iregs __far *r);

@@ -50,17 +50,20 @@ static void bios_reset(u8 drv);
 	parm [dl] modify [ax];
 
 /* INT 13h AH=42h/43h: EDD read/write with a disk address
- * packet at DS:SI. AL = 42h or 43h (function), DL = drive. */
-static u16 bios_edd(u8 fn, u8 drv, void *dap);
+ * packet at the given segment:SI. AL = 42h or 43h, DL = drive. */
+static u16 bios_edd(u8 fn, u8 drv, u16 dap_seg, u16 dap_off);
 #pragma aux bios_edd = \
-	"push bp"            \
-	"mov ah,al"          \
-	"xor al,al"          \
-	"int 13h"            \
-	"sbb bx,bx"          \
-	"and ax,bx"          \
-	"pop bp"             \
-	parm [al] [dl] [si] value [ax] modify [bx];
+	"push bp"           \
+	"push ds"           \
+	"mov ds,cx"         \
+	"mov ah,al"         \
+	"xor al,al"         \
+	"int 13h"           \
+	"sbb bx,bx"         \
+	"and ax,bx"         \
+	"pop ds"            \
+	"pop bp"            \
+	parm [al] [dl] [cx] [si] value [ax] modify [bx];
 /* clang-format on */
 
 /* EDD disk address packet. */
@@ -75,8 +78,6 @@ typedef struct dap {
 	u32 lba_hi;
 } dap;
 #pragma pack(pop)
-
-static dap edd_dap;
 
 void disk_init(u8 boot_drive) {
 	floppy_drive = boot_drive;
@@ -111,16 +112,24 @@ static int floppy_io(u8 write, u32 lba, void __far *buf) {
 }
 
 static int hdd_io(u8 write, u8 drv, u32 lba, void __far *buf) {
-	int tries;
-	edd_dap.size = 0x10;
-	edd_dap.zero = 0;
-	edd_dap.count = 1;
-	edd_dap.buf_off = FP_OFF(buf);
-	edd_dap.buf_seg = FP_SEG(buf);
-	edd_dap.lba_lo = lba;
-	edd_dap.lba_hi = 0;
+	int         tries;
+	void __far *low_buf = MK_FP(DISK_LOW_SEG, 0); /* 512-byte sector */
+	dap __far  *dp = (dap __far *)MK_FP(DISK_LOW_SEG, 512);
+	if (write) {
+		fmemcpy(low_buf, buf, 512);
+	}
+	dp->size = 0x10;
+	dp->zero = 0;
+	dp->count = 1;
+	dp->buf_off = 0;
+	dp->buf_seg = DISK_LOW_SEG;
+	dp->lba_lo = lba;
+	dp->lba_hi = 0;
 	for (tries = 0; tries < 3; tries++) {
-		if (bios_edd(write ? 0x43 : 0x42, drv, &edd_dap) == 0) {
+		if (bios_edd(write ? 0x43 : 0x42, drv, DISK_LOW_SEG, 512) == 0) {
+			if (!write) {
+				fmemcpy(buf, low_buf, 512);
+			}
 			return 0;
 		}
 		bios_reset(drv);
