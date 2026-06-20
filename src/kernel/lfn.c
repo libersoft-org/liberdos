@@ -46,6 +46,17 @@ typedef struct lfn_find {
 
 static lfn_find find_slots[LFN_MAX_HANDLES];
 
+/* Scratch buffers kept in BSS rather than on the small kernel
+ * stack (INT 21h is serialized, so static scratch is safe).
+ * s_path/s_path2 hold path copies; s_name/s_short hold the name
+ * assembled during a lookup or scan; s_tmp is find-first scratch.
+ * Their uses never overlap within a single INT 21h call. */
+static char     s_path[LFN_NAME_MAX];
+static char     s_path2[LFN_NAME_MAX];
+static char     s_name[LFN_NAME_MAX];
+static char     s_short[16];
+static lfn_find s_tmp;
+
 /* "function not supported" -> CF set, AX=7100h (LFN absent) */
 static void lfn_unsupported(iregs __far *r) {
 	r->flags |= FL_CF;
@@ -208,8 +219,8 @@ static void path_copy(const char __far *src, char *dst, u16 max) {
  * found. Returns 1 = match stored, 0 = end of directory. */
 static int find_scan(lfn_find *fs, win_find_data *fd, u8 dos_fmt) {
 	dirent83 e;
-	char     longname[LFN_NAME_MAX];
-	char     shortstr[13];
+	char    *longname = s_name;
+	char    *shortstr = s_short;
 	if (fat_select(fs->drv) != 0) {
 		return 0;
 	}
@@ -245,7 +256,7 @@ static int find_scan(lfn_find *fs, win_find_data *fd, u8 dos_fmt) {
 /* Resolve a path into its directory cluster and the (long)
  * last-component pattern. Returns 0 or a DOS error code. */
 static u16 find_open(const char __far *path, lfn_find *fs) {
-	char  near_path[LFN_NAME_MAX];
+	char *near_path = s_path;
 	u16   dir_cl;
 	u8    last11[11];
 	u16   err;
@@ -279,11 +290,10 @@ static u16 find_open(const char __far *path, lfn_find *fs) {
  * Returns AX = search handle, CX = Unicode flags (0). */
 static void f71_findfirst(iregs __far *r) {
 	static win_find_data fd;
-	lfn_find             tmp;
 	u16                  err, h;
 	u8                   dos_fmt = (u8)(r->si & 1);
-	tmp.attr = (u8)(r->cx & 0xFF);
-	err = find_open((const char __far *)MK_FP(r->ds, r->dx), &tmp);
+	s_tmp.attr = (u8)(r->cx & 0xFF);
+	err = find_open((const char __far *)MK_FP(r->ds, r->dx), &s_tmp);
 	if (err != 0) {
 		int21_error(r, err);
 		return;
@@ -297,12 +307,12 @@ static void f71_findfirst(iregs __far *r) {
 		int21_error(r, ERR_TOO_MANY_FILES);
 		return;
 	}
-	if (!find_scan(&tmp, &fd, dos_fmt)) {
+	if (!find_scan(&s_tmp, &fd, dos_fmt)) {
 		int21_error(r, ERR_NO_MORE_FILES);
 		return;
 	}
-	tmp.in_use = 1;
-	find_slots[h] = tmp;
+	s_tmp.in_use = 1;
+	find_slots[h] = s_tmp;
 	fmemcpy(MK_FP(r->es, r->di), &fd, sizeof(fd));
 	r->ax = h;
 	r->cx = 0;
@@ -335,20 +345,464 @@ static void f71_findclose(iregs __far *r) {
 	r->ax = 0;
 }
 
-/* --- 71h: long file name API dispatcher (subfunction in AL) --- */
-void f71_lfn(iregs __far *r) {
-	switch (r->ax & 0xFF) {
-	case 0x4E:
-		f71_findfirst(r);
-		return;
-	case 0x4F:
-		f71_findnext(r);
-		return;
-	case 0xA1:
-		f71_findclose(r);
-		return;
-	default:
-		lfn_unsupported(r);
+/* ============================================================
+ * Write path: long names are resolved to a short 8.3 alias and
+ * the operation is delegated to the existing 8.3 handler. New
+ * long names get VFAT slots written ahead of the 8.3 entry.
+ * Directory components of a path are assumed to be 8.3.
+ * ============================================================ */
+
+static int ci_equal(const char *a, const char *b) {
+	u16 i = 0;
+	while (a[i] != '\0' && b[i] != '\0') {
+		if (up_c(a[i]) != up_c(b[i])) {
+			return 0;
+		}
+		i++;
+	}
+	return a[i] == '\0' && b[i] == '\0';
+}
+
+/* Resolve path to (parent dir cluster, near copy, last-component
+ * pointer into the copy). Returns 0 or a DOS error code. */
+static u16 lfn_split(const char __far *path, u16 *dir_cl, char *near_path,
+                     char **base) {
+	u8    last11[11];
+	u16   err;
+	char *p;
+	err = fat_resolve_dir(path, dir_cl, last11);
+	if (err != 0) {
+		return err;
+	}
+	path_copy(path, near_path, LFN_NAME_MAX);
+	*base = near_path;
+	for (p = near_path; *p != '\0'; p++) {
+		if (*p == '\\' || *p == '/' || *p == ':') {
+			*base = p + 1;
+		}
+	}
+	return 0;
+}
+
+/* Find longname in dir_cl on drive drv. 0 = found (*e83, 8.3
+ * entry index *short_index), -1 = not found. */
+static int lfn_lookup(u8 drv, u16 dir_cl, const char *longname, dirent83 *e83,
+                      u16 *short_index) {
+	u16      idx = 0;
+	dirent83 e;
+	char    *ln = s_name;
+	char    *ss = s_short;
+	if (fat_select(drv) != 0) {
+		return -1;
+	}
+	while (fat_dir_next_lfn(dir_cl, &idx, &e, ln, LFN_NAME_MAX) == 1) {
+		if (e.name[0] == 0xE5 || e.attr == ATTR_LFN ||
+		    (e.attr & ATTR_VOLUME) != 0) {
+			continue;
+		}
+		name83_to_str(e.name, ss);
+		if (ln[0] == '\0') {
+			str_copy(ln, ss);
+		}
+		if (ci_equal(longname, ln) || ci_equal(longname, ss)) {
+			*e83 = e;
+			*short_index = (u16)(idx - 1);
+			return 0;
+		}
+	}
+	return -1;
+}
+
+/* Overwrite the last component of near_path (at base) with the
+ * 8.3 alias and return a far pointer to the rebuilt 8.3 path. */
+static const char __far *rebuild_short(char *near_path, char *base,
+                                       const u8 *name11) {
+	name83_to_str(name11, base);
+	return (const char __far *)MK_FP(get_cs(), (u16)near_path);
+}
+
+/* --- 716Ch: extended open/create ---
+ * BX = access mode, CX = attributes, DX = action (1 open, 2
+ * replace, 0x10 create), DS:SI = path. Returns AX = handle,
+ * CX = action taken (1 opened, 2 created, 3 truncated). */
+static void f71_open(iregs __far *r) {
+	char             *near_path = s_path;
+	char             *base;
+	dirent83          e;
+	u8                short11[11];
+	u16               dir_cl, err, sidx;
+	u16               access = r->bx;
+	u16               attrib = r->cx;
+	u16               action = r->dx;
+	u8                drv;
+	const char __far *path = (const char __far *)MK_FP(r->ds, r->si);
+	err = lfn_split(path, &dir_cl, near_path, &base);
+	if (err != 0) {
+		int21_error(r, err);
 		return;
 	}
+	drv = fat_cur_drive();
+	if (lfn_lookup(drv, dir_cl, base, &e, &sidx) == 0) {
+		/* exists: replace (truncate) or open */
+		(void)rebuild_short(near_path, base, e.name);
+		r->ds = get_cs();
+		r->dx = (u16)near_path;
+		if (action & 0x02) {
+			r->cx = attrib;
+			f3c_create(r); /* truncate */
+			if (!(r->flags & FL_CF)) {
+				r->cx = 3;
+			}
+		} else if (action & 0x01) {
+			r->ax = (u16)(0x3D00 | (access & 0x7F));
+			f3d_open(r);
+			if (!(r->flags & FL_CF)) {
+				r->cx = 1;
+			}
+		} else {
+			int21_error(r, 0x50); /* exists but no open/replace allowed */
+		}
+		return;
+	}
+	if (!(action & 0x10)) {
+		int21_error(r, ERR_FILE_NOT_FOUND);
+		return;
+	}
+	if (fat_is_short_name(base, short11)) {
+		r->ds = get_cs();
+		r->dx = (u16)near_path;
+		r->cx = attrib;
+		f3c_create(r);
+		if (!(r->flags & FL_CF)) {
+			r->cx = 2;
+		}
+		return;
+	}
+	fat_make_shortname(dir_cl, base, short11);
+	if (fat_alloc_lfn_entry(dir_cl, base, short11, &sidx) != 0) {
+		int21_error(r, ERR_ACCESS_DENIED);
+		return;
+	}
+	fmemset(&e, 0, sizeof(e));
+	fmemcpy(e.name, short11, 11);
+	e.attr = (u8)((attrib & 0x27) | ATTR_ARCHIVE);
+	e.cluster = 0;
+	e.size = 0;
+	e.time = clock_dos_time();
+	e.date = clock_dos_date();
+	if (fat_dir_set(dir_cl, sidx, &e) != 0 || fat_commit() != 0) {
+		int21_error(r, ERR_ACCESS_DENIED);
+		return;
+	}
+	(void)rebuild_short(near_path, base, short11);
+	r->ds = get_cs();
+	r->dx = (u16)near_path;
+	r->ax = (u16)(0x3D00 | (access & 0x7F) | 0x02);
+	f3d_open(r);
+	if (!(r->flags & FL_CF)) {
+		r->cx = 2;
+	}
+}
+
+/* --- 7139h: make directory (DS:DX = path) --- */
+static void f71_mkdir(iregs __far *r) {
+	char             *near_path = s_path;
+	char             *base;
+	dirent83          e;
+	u8                short11[11];
+	u16               dir_cl, err, sidx, cl;
+	const char __far *path = (const char __far *)MK_FP(r->ds, r->dx);
+	err = lfn_split(path, &dir_cl, near_path, &base);
+	if (err != 0) {
+		int21_error(r, err);
+		return;
+	}
+	if (lfn_lookup(fat_cur_drive(), dir_cl, base, &e, &sidx) == 0) {
+		int21_error(r, ERR_ACCESS_DENIED); /* already exists */
+		return;
+	}
+	if (fat_is_short_name(base, short11)) {
+		r->ds = get_cs();
+		r->dx = (u16)near_path;
+		f39_mkdir(r);
+		return;
+	}
+	fat_make_shortname(dir_cl, base, short11);
+	if (fat_alloc_lfn_entry(dir_cl, base, short11, &sidx) != 0) {
+		int21_error(r, ERR_ACCESS_DENIED);
+		return;
+	}
+	cl = fat_alloc(0);
+	if (cl == 0 || fat_zero_cluster(cl) != 0) {
+		int21_error(r, ERR_ACCESS_DENIED);
+		return;
+	}
+	fmemset(&e, 0, sizeof(e)); /* "." entry */
+	fmemset(e.name, ' ', 11);
+	e.name[0] = '.';
+	e.attr = ATTR_DIR;
+	e.time = clock_dos_time();
+	e.date = clock_dos_date();
+	e.cluster = cl;
+	if (fat_dir_set(cl, 0, &e) != 0) {
+		int21_error(r, ERR_ACCESS_DENIED);
+		return;
+	}
+	e.name[1] = '.';    /* ".." entry */
+	e.cluster = dir_cl; /* 0 = root, per spec */
+	if (fat_dir_set(cl, 1, &e) != 0) {
+		int21_error(r, ERR_ACCESS_DENIED);
+		return;
+	}
+	fmemcpy(e.name, short11, 11); /* parent entry at the 8.3 slot */
+	e.attr = ATTR_DIR;
+	e.cluster = cl;
+	if (fat_dir_set(dir_cl, sidx, &e) != 0 || fat_commit() != 0) {
+		int21_error(r, ERR_ACCESS_DENIED);
+	}
+}
+
+/* --- 713Ah: remove directory (DS:DX = path) --- */
+static void f71_rmdir(iregs __far *r) {
+	char             *near_path = s_path;
+	char             *base;
+	dirent83          e;
+	u16               dir_cl, err, sidx;
+	u8                drv;
+	const char __far *path = (const char __far *)MK_FP(r->ds, r->dx);
+	err = lfn_split(path, &dir_cl, near_path, &base);
+	if (err != 0) {
+		int21_error(r, err);
+		return;
+	}
+	drv = fat_cur_drive();
+	if (lfn_lookup(drv, dir_cl, base, &e, &sidx) != 0 ||
+	    (e.attr & ATTR_DIR) == 0) {
+		int21_error(r, ERR_PATH_NOT_FOUND);
+		return;
+	}
+	(void)rebuild_short(near_path, base, e.name);
+	r->ds = get_cs();
+	r->dx = (u16)near_path;
+	f3a_rmdir(r);
+	if (!(r->flags & FL_CF)) {
+		fat_select(drv);
+		fat_delete_lfn_slots(dir_cl, sidx);
+		fat_commit();
+	}
+}
+
+/* --- 713Bh: change directory (DS:DX = path) --- */
+static void f71_chdir(iregs __far *r) {
+	char             *near_path = s_path;
+	char             *base;
+	dirent83          e;
+	u16               dir_cl, err, sidx;
+	const char __far *path = (const char __far *)MK_FP(r->ds, r->dx);
+	err = lfn_split(path, &dir_cl, near_path, &base);
+	if (err != 0) {
+		int21_error(r, err);
+		return;
+	}
+	if (lfn_lookup(fat_cur_drive(), dir_cl, base, &e, &sidx) != 0 ||
+	    (e.attr & ATTR_DIR) == 0) {
+		int21_error(r, ERR_PATH_NOT_FOUND);
+		return;
+	}
+	(void)rebuild_short(near_path, base, e.name);
+	if (fat_chdir((const char __far *)MK_FP(get_cs(), (u16)near_path)) != 0) {
+		int21_error(r, ERR_PATH_NOT_FOUND);
+	}
+}
+
+/* --- 7141h: delete file (DS:DX = path) --- */
+static void f71_delete(iregs __far *r) {
+	char             *near_path = s_path;
+	char             *base;
+	dirent83          e;
+	u16               dir_cl, err, sidx;
+	u8                drv;
+	const char __far *path = (const char __far *)MK_FP(r->ds, r->dx);
+	err = lfn_split(path, &dir_cl, near_path, &base);
+	if (err != 0) {
+		int21_error(r, err);
+		return;
+	}
+	drv = fat_cur_drive();
+	if (lfn_lookup(drv, dir_cl, base, &e, &sidx) != 0) {
+		int21_error(r, ERR_FILE_NOT_FOUND);
+		return;
+	}
+	if (e.attr & ATTR_DIR) {
+		int21_error(r, ERR_ACCESS_DENIED);
+		return;
+	}
+	(void)rebuild_short(near_path, base, e.name);
+	r->ds = get_cs();
+	r->dx = (u16)near_path;
+	f41_unlink(r);
+	if (!(r->flags & FL_CF)) {
+		fat_select(drv);
+		fat_delete_lfn_slots(dir_cl, sidx);
+		fat_commit();
+	}
+}
+
+/* --- 7143h: get/set attributes (BL = subfunction, DS:DX = path,
+ * CX = attributes for set) --- */
+static void f71_attr(iregs __far *r) {
+	char             *near_path = s_path;
+	char             *base;
+	dirent83          e;
+	u16               dir_cl, err, sidx;
+	u8                sub = (u8)(r->bx & 0xFF);
+	const char __far *path = (const char __far *)MK_FP(r->ds, r->dx);
+	err = lfn_split(path, &dir_cl, near_path, &base);
+	if (err != 0) {
+		int21_error(r, err);
+		return;
+	}
+	if (lfn_lookup(fat_cur_drive(), dir_cl, base, &e, &sidx) != 0) {
+		int21_error(r, ERR_FILE_NOT_FOUND);
+		return;
+	}
+	(void)rebuild_short(near_path, base, e.name);
+	r->ds = get_cs();
+	r->dx = (u16)near_path;
+	r->ax = (u16)(0x4300 | sub);
+	f43_attrib(r);
+}
+
+/* --- 7147h: get current directory (DL = drive, DS:SI = buf) ---
+ * The cwd is stored as 8.3 text, returned verbatim. */
+static void f71_getcwd(iregs __far *r) {
+	f47_getcwd(r);
+}
+
+/* --- 7156h: rename / move (DS:DX = old, ES:DI = new) --- */
+static void f71_rename(iregs __far *r) {
+	char    *oldp = s_path, *newp = s_path2;
+	char    *obase, *nbase;
+	dirent83 oe, ne;
+	u8       short11[11];
+	u16      odir, ndir, err, osidx, nsidx;
+	u8       drv;
+	err = lfn_split((const char __far *)MK_FP(r->ds, r->dx), &odir, oldp,
+	                &obase);
+	if (err != 0) {
+		int21_error(r, err);
+		return;
+	}
+	drv = fat_cur_drive();
+	if (lfn_lookup(drv, odir, obase, &oe, &osidx) != 0) {
+		int21_error(r, ERR_FILE_NOT_FOUND);
+		return;
+	}
+	err = lfn_split((const char __far *)MK_FP(r->es, r->di), &ndir, newp,
+	                &nbase);
+	if (err != 0) {
+		int21_error(r, err);
+		return;
+	}
+	if (lfn_lookup(fat_cur_drive(), ndir, nbase, &ne, &nsidx) == 0) {
+		int21_error(r, ERR_ACCESS_DENIED); /* target exists */
+		return;
+	}
+	fat_select(drv);
+	if (fat_is_short_name(nbase, short11)) {
+		if (fat_dir_alloc_slot(ndir, &nsidx) != 0) {
+			int21_error(r, ERR_ACCESS_DENIED);
+			return;
+		}
+	} else {
+		fat_make_shortname(ndir, nbase, short11);
+		if (fat_alloc_lfn_entry(ndir, nbase, short11, &nsidx) != 0) {
+			int21_error(r, ERR_ACCESS_DENIED);
+			return;
+		}
+	}
+	ne = oe; /* keep cluster/size/attr/time, change name */
+	fmemcpy(ne.name, short11, 11);
+	if (fat_dir_set(ndir, nsidx, &ne) != 0) {
+		int21_error(r, ERR_ACCESS_DENIED);
+		return;
+	}
+	fat_delete_lfn_slots(odir, osidx);
+	if (fat_dir_entry(odir, osidx, &oe) == 0) {
+		oe.name[0] = 0xE5; /* delete old 8.3 entry */
+		fat_dir_set(odir, osidx, &oe);
+	}
+	if (fat_commit() != 0) {
+		int21_error(r, ERR_ACCESS_DENIED);
+	}
+}
+
+/* --- 71A0h: get volume info (DS:DX = root, ES:DI = name buf,
+ * CX = buf size). Reports FAT with LFN support. --- */
+static void f71_volinfo(iregs __far *r) {
+	u8 __far *p = (u8 __far *)MK_FP(r->es, r->di);
+	if (r->cx >= 4) {
+		p[0] = 'F';
+		p[1] = 'A';
+		p[2] = 'T';
+		p[3] = '\0';
+	}
+	r->bx = 0;   /* file system flags */
+	r->cx = 255; /* max filename component length */
+	r->dx = 260; /* max path length */
+	r->ax = 0;
+}
+
+/* --- 71h: long file name API dispatcher (subfunction in AL) ---
+ * DS/ES are saved and restored around every subfunction: the
+ * write handlers temporarily repoint DS at the kernel segment to
+ * delegate to the 8.3 handlers, and that change must not leak
+ * back to the caller through the iregs frame. No 71xx function
+ * returns data in a segment register, so restoring is safe. */
+void f71_lfn(iregs __far *r) {
+	u16 sds = r->ds;
+	u16 ses = r->es;
+	switch (r->ax & 0xFF) {
+	case 0x39:
+		f71_mkdir(r);
+		break;
+	case 0x3A:
+		f71_rmdir(r);
+		break;
+	case 0x3B:
+		f71_chdir(r);
+		break;
+	case 0x41:
+		f71_delete(r);
+		break;
+	case 0x43:
+		f71_attr(r);
+		break;
+	case 0x47:
+		f71_getcwd(r);
+		break;
+	case 0x4E:
+		f71_findfirst(r);
+		break;
+	case 0x4F:
+		f71_findnext(r);
+		break;
+	case 0x56:
+		f71_rename(r);
+		break;
+	case 0x6C:
+		f71_open(r);
+		break;
+	case 0xA0:
+		f71_volinfo(r);
+		break;
+	case 0xA1:
+		f71_findclose(r);
+		break;
+	default:
+		lfn_unsupported(r);
+		break;
+	}
+	r->ds = sds;
+	r->es = ses;
 }

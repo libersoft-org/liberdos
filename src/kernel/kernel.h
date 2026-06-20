@@ -206,6 +206,12 @@ u16          fat_cwd_cluster(void);
 u8           fat_lfn_checksum(const u8 *name11); /* 8.3 -> VFAT checksum */
 int          fat_dir_next_lfn(u16 dir_cluster, u16 *index, dirent83 *out83,
                               char *longname, u16 lmax);
+int          fat_is_short_name(const char *name, u8 *out11);
+void         fat_make_shortname(u16 dir_cluster, const char *longname, u8 *out11);
+int          fat_dir_alloc_run(u16 dir_cluster, u16 count, u16 *first);
+int          fat_alloc_lfn_entry(u16 dir_cluster, const char *longname,
+                                 const u8 *short11, u16 *short_index);
+void         fat_delete_lfn_slots(u16 dir_cluster, u16 short_index);
 void __cdecl absdisk_dispatch(iregs __far *r); /* INT 25h/26h core */
 extern u8    absdisk_cf; /* status for the stub's live CF */
 

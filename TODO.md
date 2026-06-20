@@ -16,6 +16,5 @@
 
 ## Test
 
-- Is it better to have mouse driver as a separate binary (mouse.com)?
 - .asm / .c / .h / .ps1 / .sh autoformater (must be multiplatform)
 - Linux build / run / make scripts (build.sh, run.sh, mtools)

@@ -629,6 +629,250 @@ int fat_dir_next_lfn(u16 dir_cluster, u16 *index, dirent83 *out83,
 	}
 }
 
+static u8 up_fat(u8 c) {
+	return c >= 'a' && c <= 'z' ? (u8)(c - 32) : c;
+}
+
+/* Map a character to a valid 8.3 character, upper-casing and
+ * replacing anything illegal with '_'. */
+static u8 short_char(u8 c) {
+	c = up_fat(c);
+	if (c < 0x20 || c == ' ' || c == '"' || c == '*' || c == '+' ||
+	    c == ',' || c == '.' || c == '/' || c == ':' || c == ';' ||
+	    c == '<' || c == '=' || c == '>' || c == '?' || c == '[' ||
+	    c == '\\' || c == ']' || c == '|') {
+		return '_';
+	}
+	return c;
+}
+
+/* If name fits the 8.3 form, fill out11 (space-padded, upper-
+ * cased) and return 1; otherwise return 0 (a long name is
+ * required). Lower-case 8.3 names are accepted and upper-cased
+ * (case is not preserved for short names). */
+int fat_is_short_name(const char *name, u8 *out11) {
+	u16 i, len = 0, base, ext;
+	int dot = -1;
+	for (i = 0; name[i] != '\0'; i++) {
+		len++;
+	}
+	if (len == 0 || len > 12) {
+		return 0;
+	}
+	for (i = 0; i < len; i++) {
+		if (name[i] == '.') {
+			dot = (int)i;
+		}
+	}
+	if (dot < 0) {
+		base = len;
+		ext = 0;
+	} else {
+		base = (u16)dot;
+		ext = (u16)(len - dot - 1);
+	}
+	if (base == 0 || base > 8 || ext > 3) {
+		return 0;
+	}
+	for (i = 0; i < len; i++) {
+		u8 c = (u8)name[i];
+		if (c == '.') {
+			if ((int)i != dot) {
+				return 0; /* more than one dot */
+			}
+			continue;
+		}
+		if (c == ' ' || c == '+' || c == ',' || c == ';' || c == '=' ||
+		    c == '[' || c == ']') {
+			return 0;
+		}
+	}
+	for (i = 0; i < 11; i++) {
+		out11[i] = ' ';
+	}
+	for (i = 0; i < base; i++) {
+		out11[i] = up_fat((u8)name[i]);
+	}
+	for (i = 0; i < ext; i++) {
+		out11[8 + i] = up_fat((u8)name[dot + 1 + i]);
+	}
+	return 1;
+}
+
+/* Generate a unique 8.3 alias (BASE~N.EXT) for a long name in
+ * dir_cluster, avoiding collisions with existing entries. */
+void fat_make_shortname(u16 dir_cluster, const char *longname, u8 *out11) {
+	u8       base[8], ext[3];
+	u16      bl = 0, el = 0, len = 0, i, n;
+	int      dot = -1;
+	dirent83 e;
+	for (i = 0; longname[i] != '\0'; i++) {
+		len++;
+	}
+	for (i = 0; i < len; i++) {
+		if (longname[i] == '.') {
+			dot = (int)i;
+		}
+	}
+	for (i = 0; i < len && bl < 8; i++) {
+		u8 c = (u8)longname[i];
+		if ((int)i == dot) {
+			break;
+		}
+		if (c == ' ' || c == '.') {
+			continue;
+		}
+		base[bl++] = short_char(c);
+	}
+	if (dot >= 0) {
+		for (i = (u16)(dot + 1); i < len && el < 3; i++) {
+			u8 c = (u8)longname[i];
+			if (c == ' ' || c == '.') {
+				continue;
+			}
+			ext[el++] = short_char(c);
+		}
+	}
+	if (bl == 0) {
+		base[bl++] = '_';
+	}
+	for (n = 1; n <= 999; n++) {
+		u8  num[3];
+		u16 nd = 0, keep, t = n;
+		u8  tmp[3], td = 0;
+		while (t != 0) {
+			tmp[td++] = (u8)('0' + t % 10);
+			t /= 10;
+		}
+		while (td != 0) {
+			num[nd++] = tmp[--td];
+		}
+		keep = (u16)(8 - 1 - nd);
+		if (keep > bl) {
+			keep = bl;
+		}
+		for (i = 0; i < 11; i++) {
+			out11[i] = ' ';
+		}
+		for (i = 0; i < keep; i++) {
+			out11[i] = base[i];
+		}
+		out11[keep] = '~';
+		for (i = 0; i < nd; i++) {
+			out11[keep + 1 + i] = num[i];
+		}
+		for (i = 0; i < el; i++) {
+			out11[8 + i] = ext[i];
+		}
+		if (fat_dir_search(dir_cluster, out11, &e) != 0) {
+			return; /* unique */
+		}
+	}
+}
+
+/* Find a contiguous run of count free directory slots (deleted
+ * or end-of-directory), growing subdirectories as needed.
+ * 0 = OK (*first = first slot index), -1 = directory full. */
+int fat_dir_alloc_run(u16 dir_cluster, u16 count, u16 *first) {
+	u16      i = 0, run = 0, start = 0;
+	dirent83 e;
+	for (;;) {
+		if (fat_dir_entry(dir_cluster, i, &e) != 0) {
+			if (dir_cluster == 0) {
+				return -1; /* root directory is full */
+			}
+			if (fat_dir_extend(dir_cluster) != 0) {
+				return -1;
+			}
+			continue; /* entry i now exists, zeroed */
+		}
+		if (e.name[0] == 0x00 || e.name[0] == 0xE5) {
+			if (run == 0) {
+				start = i;
+			}
+			run++;
+			if (run == count) {
+				*first = start;
+				return 0;
+			}
+		} else {
+			run = 0;
+		}
+		i++;
+	}
+}
+
+/* Allocate a run for the long-name slots of longname plus the
+ * trailing 8.3 entry, write the slots (checksummed against
+ * short11), and return in *short_index where the caller must
+ * write the 8.3 entry. Does not commit. 0 = OK, -1 = full. */
+int fat_alloc_lfn_entry(u16 dir_cluster, const char *longname,
+                        const u8 *short11, u16 *short_index) {
+	u16 len = 0, nslots, first, i;
+	u8  sum;
+	for (i = 0; longname[i] != '\0'; i++) {
+		len++;
+	}
+	nslots = (u16)((len + 12) / 13);
+	if (nslots == 0) {
+		nslots = 1;
+	}
+	if (fat_dir_alloc_run(dir_cluster, (u16)(nslots + 1), &first) != 0) {
+		return -1;
+	}
+	sum = fat_lfn_checksum(short11);
+	for (i = 0; i < nslots; i++) {
+		dirent83 slot;
+		u8      *raw = (u8 *)&slot;
+		u16      ordn = (u16)(nslots - i); /* slot first+i holds this ordinal */
+		u16      base = (u16)((ordn - 1) * 13);
+		u16      k;
+		fmemset(&slot, 0, 32);
+		raw[0] = (u8)(ordn | (i == 0 ? 0x40 : 0)); /* first on disk = last */
+		raw[11] = ATTR_LFN;
+		raw[13] = sum;
+		for (k = 0; k < 13; k++) {
+			u16 off = lfn_unit_off[k];
+			u16 idx = (u16)(base + k);
+			u16 unit;
+			if (idx < len) {
+				unit = (u8)longname[idx];
+			} else if (idx == len) {
+				unit = 0x0000;
+			} else {
+				unit = 0xFFFF;
+			}
+			raw[off] = (u8)(unit & 0xFF);
+			raw[off + 1] = (u8)(unit >> 8);
+		}
+		if (fat_dir_set(dir_cluster, (u16)(first + i), &slot) != 0) {
+			return -1;
+		}
+	}
+	*short_index = (u16)(first + nslots);
+	return 0;
+}
+
+/* Mark the long-name slots immediately preceding short_index as
+ * deleted (0xE5). Stops at the first non-LFN / free entry. */
+void fat_delete_lfn_slots(u16 dir_cluster, u16 short_index) {
+	dirent83 e;
+	u16      i = short_index;
+	while (i > 0) {
+		i--;
+		if (fat_dir_entry(dir_cluster, i, &e) != 0) {
+			break;
+		}
+		if (e.attr != ATTR_LFN || e.name[0] == 0xE5 || e.name[0] == 0x00) {
+			break;
+		}
+		e.name[0] = 0xE5;
+		if (fat_dir_set(dir_cluster, i, &e) != 0) {
+			break;
+		}
+	}
+}
+
 
 /* Parse one path component at *pp into an 11-char 8.3 name
  * (uppercased, '*' expanded to '?'s). Advances *pp past the
