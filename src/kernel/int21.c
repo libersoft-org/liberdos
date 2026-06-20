@@ -254,12 +254,12 @@ static void f25_setvect(iregs __far *r) {
 }
 
 /* --- 30h: get DOS version -> AL = major, AH = minor (default
- * 5.0), BX = CX = 0. The version comes from the current PSP
+ * 7.0), BX = CX = 0. The version comes from the current PSP
  * (offset 40h), where EXEC may have stored a SETVER override
  * - see setver.c. --- */
 static void f30_version(iregs __far *r) {
 	u16 psp = proc_get_psp();
-	r->ax = psp != 0 ? peekw(psp, 0x40) : 0x0005;
+	r->ax = psp != 0 ? peekw(psp, 0x40) : DOS_REPORTED_VERSION;
 	r->bx = 0;
 	r->cx = 0;
 }
@@ -319,7 +319,7 @@ static void f33_break(iregs __far *r) {
 		r->dx = (u16)((r->dx & 0xFF00u) | 1);
 		return;
 	case 0x06:          /* true DOS version */
-		r->bx = 0x0005; /* 5.0 */
+		r->bx = DOS_REPORTED_VERSION;
 		r->dx = 0;
 		return;
 	default:

@@ -10,6 +10,6 @@
 #define VERSION_H
 
 #define OS_NAME    "LiberDOS"
-#define OS_VERSION "0.1"
+#define OS_VERSION "0.2"
 
 #endif

@@ -258,7 +258,7 @@ static void psp_build(u16 psp, u16 memtop, u16 env, u16 parent) {
 	pokew(psp, 0x36, psp);
 	pokew(psp, 0x38, 0xFFFF); /* previous PSP: none */
 	pokew(psp, 0x3A, 0xFFFF);
-	pokew(psp, 0x40, 0x0005); /* DOS version to report */
+	pokew(psp, 0x40, DOS_REPORTED_VERSION); /* DOS version to report */
 	pokeb(psp, 0x50, 0xCD);   /* INT 21h; RETF */
 	pokeb(psp, 0x51, 0x21);
 	pokeb(psp, 0x52, 0xCB);

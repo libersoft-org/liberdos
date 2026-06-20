@@ -57,6 +57,11 @@ u8 peekb(u16 seg, u16 off);
 #define FP_SEG(p) ((u16)((u32)(void __far *)(p) >> 16))
 #define FP_OFF(p) ((u16)(u32)(void __far *)(p))
 
+/* DOS version reported by INT 21h fn 30h and fn 33h/06h, and
+ * stored in each PSP (offset 40h) as the default before any
+ * SETVER override. Low byte = major, high byte = minor. */
+#define DOS_REPORTED_VERSION 0x0007 /* 7.0 */
+
 /* DOS error codes (returned in AX with CF set). */
 #define ERR_INVALID_FUNC      0x01
 #define ERR_FILE_NOT_FOUND    0x02
