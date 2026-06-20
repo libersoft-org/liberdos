@@ -23,15 +23,15 @@
 
 ### Broad DOS compatibility
 
-- Wide coverage of the DOS programming interface (INT 21h and related services), so existing DOS programs run unmodified.
+- Wide coverage of the DOS programming interface (INT 21h and related services), so existing DOS programs run unmodified. Reports DOS version 7 and supports the long file name (LFN) API.
 - Runs 16-bit .COM and .EXE programs as well as 32-bit protected mode software through DOS extenders.
 - XMS 2.0 extended memory, EMS 4.0 expanded memory and a mouse driver are built into the kernel - no separate drivers needed.
-- Small kernel footprint leaves over 600 KB of free conventional memory for applications.
+- The kernel relocates itself into the HMA (DOS=HIGH), leaving over 630 KB of free conventional memory for applications.
 
 ### Storage
 
 - Boots from a floppy disk or from a hard disk partition.
-- FAT12 and FAT16 file systems with subdirectories, multiple drives and file sharing/locking.
+- FAT12 and FAT16 file systems with subdirectories, long file names (VFAT), multiple drives and file sharing/locking.
 
 ### Command line shell
 
