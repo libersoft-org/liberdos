@@ -57,6 +57,7 @@ vol_lab=$(printf '%-11.11s' "$(printf '%s' "$OSNAME" | tr '[:lower:]' '[:upper:]
 nasm -f bin "$src/boot/boot.asm" -o "$boot/boot.bin" -I "$obj/"
 nasm -f bin "$src/boot/mbr.asm" -o "$boot/mbr.bin"
 nasm -f bin "$src/boot/boothdd.asm" -o "$boot/boothdd.bin" -I "$obj/"
+nasm -f bin "$src/boot/boothdd32.asm" -o "$boot/boothdd32.bin" -I "$obj/"
 
 # --- 2. kernel: NASM startup stub + OpenWatcom C, linked to a flat binary ---
 nasm -f obj "$src/kernel/startup.asm" -o "$obj/startup.obj"

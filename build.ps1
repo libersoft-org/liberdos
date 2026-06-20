@@ -47,6 +47,8 @@ if ($LASTEXITCODE) { exit 1 }
 if ($LASTEXITCODE) { exit 1 }
 & $NASM -f bin "$src\boot\boothdd.asm" -o "$boot\boothdd.bin" -I "$obj/"
 if ($LASTEXITCODE) { exit 1 }
+& $NASM -f bin "$src\boot\boothdd32.asm" -o "$boot\boothdd32.bin" -I "$obj/"
+if ($LASTEXITCODE) { exit 1 }
 
 # --- 2. kernel: NASM startup stub + OpenWatcom C, linked to a flat binary ---
 & $NASM -f obj "$src\kernel\startup.asm" -o "$obj\startup.obj"

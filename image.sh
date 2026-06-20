@@ -26,6 +26,7 @@ Usage: ./image.sh [--fdd floppy.img] [--hdd disk.img] [--size N[K|M|G]] [--add d
 
   --fdd floppy.img    create a bootable 1.44 MB FAT12 floppy image
   --hdd disk.img      create a bootable FAT16 hard disk image
+  --fat32             make the --hdd image FAT32 instead of FAT16
   --size N[K|M|G]     hard disk image size (with --hdd only);
 					  a plain number is bytes, the K/M/G suffix
 					  selects 1024-based units (default 32M)
@@ -43,6 +44,7 @@ EOF
 fdd=
 hdd=
 size=
+fat32=
 add_dirs=
 while [ $# -gt 0 ]; do
 	case $1 in
@@ -55,6 +57,9 @@ while [ $# -gt 0 ]; do
 		[ $# -ge 2 ] || usage
 		hdd=$2
 		shift
+		;;
+	--fat32)
+		fat32=1
 		;;
 	--size)
 		[ $# -ge 2 ] || usage
@@ -207,10 +212,20 @@ make_hdd() {
 	hdd_size=$2
 	shift 2
 	require_sector "$boot/mbr.bin"
-	require_sector "$boot/boothdd.bin"
+	if [ -n "$fat32" ]; then
+		require_sector "$boot/boothdd32.bin"
+		bootcode=$boot/boothdd32.bin
+		ptype=12  # 0x0C: FAT32 LBA partition
+		drvoff=64 # BPB drive-number offset (FAT32 EBPB)
+	else
+		require_sector "$boot/boothdd.bin"
+		bootcode=$boot/boothdd.bin
+		ptype=6   # 0x06: FAT16B partition
+		drvoff=36 # BPB drive-number offset (FAT16 EBPB)
+	fi
 
 	if [ "$hdd_size" -ge 2147483648 ]; then
-		echo "disk size must be under 2 GB (FAT16): $hdd_size" >&2
+		echo "disk size must be under 2 GB: $hdd_size" >&2
 		exit 1
 	fi
 	total_secs=$(((hdd_size + 511) / 512))
@@ -218,8 +233,19 @@ make_hdd() {
 	part_secs=$((total_secs - part_start))
 	part_off=$((part_start * 512))
 
-	# sectors per cluster from the DOS FAT16 table
-	if [ "$hdd_size" -le 134217728 ]; then
+	# sectors per cluster: FAT32 needs >= 65525 clusters, so use
+	# small clusters; FAT16 follows the classic DOS size table
+	if [ -n "$fat32" ]; then
+		if [ "$hdd_size" -le 268435456 ]; then
+			spc=1
+		elif [ "$hdd_size" -le 536870912 ]; then
+			spc=2
+		elif [ "$hdd_size" -le 1073741824 ]; then
+			spc=4
+		else
+			spc=8
+		fi
+	elif [ "$hdd_size" -le 134217728 ]; then
 		spc=4
 	elif [ "$hdd_size" -le 268435456 ]; then
 		spc=8
@@ -232,7 +258,7 @@ make_hdd() {
 	fi
 	spf=$(((part_secs - 1 - 32 + 256 * spc + 1) / (256 * spc + 2)))
 	clusters=$(((part_secs - 1 - 32 - 2 * spf) / spc))
-	if [ "$clusters" -lt 4085 ]; then
+	if [ -z "$fat32" ] && [ "$clusters" -lt 4085 ]; then
 		echo "disk too small for FAT16 - use at least 9M: $hdd_size" >&2
 		exit 1
 	fi
@@ -250,7 +276,9 @@ make_hdd() {
 	# dummy (0/1/1), type 06h (FAT16B), CHS end capped (FE/FF/FF),
 	# LBA start 63, LBA size = part_secs (little-endian)
 	{
-		printf '\200\001\001\000\006\376\377\377\077\000\000\000'
+		printf '\200\001\001\000'
+		printf "\\$(printf '%03o' "$ptype")"
+		printf '\376\377\377\077\000\000\000'
 		for shift_by in 0 8 16 24; do
 			# shellcheck disable=SC2059
 			printf "\\$(printf '%03o' $(((part_secs >> shift_by) & 255)))"
@@ -258,20 +286,27 @@ make_hdd() {
 	} | dd of="$out" bs=1 seek=446 conv=notrunc 2>/dev/null
 	printf '\125\252' | dd of="$out" bs=1 seek=510 conv=notrunc 2>/dev/null
 
-	# format the partition (FAT16, geometry matching the MBR);
-	# mformat overwrites the BPB inside the supplied boot sector
-	# code with the values derived from these parameters
-	mformat -i "$out@@$part_off" \
-		-T $part_secs -h 16 -s 63 -H $part_start \
-		-c $spc -d 2 -r 32 -m 0xf8 \
-		-B "$boot/boothdd.bin" -v "$vol_lab"
+	# format the partition; mformat overwrites the BPB inside the
+	# supplied boot sector code with the values derived from these
+	# parameters (-F forces FAT32 for the FAT32 boot sector)
+	if [ -n "$fat32" ]; then
+		mformat -i "$out@@$part_off" \
+			-T $part_secs -h 16 -s 63 -H $part_start \
+			-c $spc -d 2 -m 0xf8 -F \
+			-B "$bootcode" -v "$vol_lab"
+	else
+		mformat -i "$out@@$part_off" \
+			-T $part_secs -h 16 -s 63 -H $part_start \
+			-c $spc -d 2 -r 32 -m 0xf8 \
+			-B "$bootcode" -v "$vol_lab"
+	fi
 
 	# BPB details mformat does not control: OEM id (offset 3,
 	# 8 bytes) and BIOS drive number 80h (offset 36)
 	printf '%s' "$oem_id" |
 		dd of="$out" bs=1 seek=$((part_off + 3)) conv=notrunc 2>/dev/null
 	printf '\200' |
-		dd of="$out" bs=1 seek=$((part_off + 36)) conv=notrunc 2>/dev/null
+		dd of="$out" bs=1 seek=$((part_off + drvoff)) conv=notrunc 2>/dev/null
 
 	inject_specs "$out@@$part_off" "$@"
 	echo "$(basename "$out"): $# item(s)"
