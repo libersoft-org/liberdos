@@ -63,7 +63,7 @@ nasm -f obj "$src/kernel/startup.asm" -o "$obj/startup.obj"
 
 # small model, 386 instr, size-opt, no stack checks, no default libs
 CFLAGS='-bt=dos -ms -3 -os -s -zl -zq -wx'
-SOURCES='main console int21 disk fat file fcb clock proc util xms ems mouse share setver'
+SOURCES='main console int21 disk fat file fcb clock proc util xms ems mouse share setver lfn'
 for name in $SOURCES; do
 	wcc $CFLAGS "$src/kernel/$name.c" "-fo=$obj/$name.obj"
 done

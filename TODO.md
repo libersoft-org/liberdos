@@ -4,8 +4,10 @@
 
 ## New features
 
-- Add commit script
-- CD-ROM driver
+- Add long file names support
+- FAT32 support
+- Move XMS, EMS and MOUSE driver out of the kernel (as separate drivers) to spare some extra conventional memory
+- CD-ROM driver (separate driver)
 - More DOS-familiar CLI commands / utilities
 - Make hard drive installer on floppy
 - Command line - command history (arrows up / down)

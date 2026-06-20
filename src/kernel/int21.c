@@ -15,7 +15,7 @@
  * ============================================================ */
 #include "kernel.h"
 
-#define TABLE_SIZE 0x70
+#define TABLE_SIZE 0x72
 
 typedef void (*handler_t)(iregs __far *r);
 
@@ -487,6 +487,7 @@ void int21_init(void) {
 	table[0x5C] = f5c_lock;
 	table[0x62] = f51_getpsp;
 	table[0x68] = f68_commit;
+	table[0x71] = f71_lfn;
 }
 
 void __cdecl int21_dispatch(iregs __far *r) {

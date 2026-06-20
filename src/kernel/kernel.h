@@ -81,6 +81,7 @@ u8 peekb(u16 seg, u16 off);
 #define ATTR_VOLUME   0x08
 #define ATTR_DIR      0x10
 #define ATTR_ARCHIVE  0x20
+#define ATTR_LFN      0x0F /* VFAT long-name slot (RO|HID|SYS|VOL) */
 
 /* Register frame built by the INT 21h stub in startup.asm on
  * the caller's stack; the dispatcher receives a far pointer to
@@ -202,6 +203,9 @@ u16          fat_resolve_dir(const char __far *path, u16 *dir_cl, u8 *last11);
 u16          fat_chdir(const char __far *path);
 const char  *fat_get_cwd(u8 drv);
 u16          fat_cwd_cluster(void);
+u8           fat_lfn_checksum(const u8 *name11); /* 8.3 -> VFAT checksum */
+int          fat_dir_next_lfn(u16 dir_cluster, u16 *index, dirent83 *out83,
+                              char *longname, u16 lmax);
 void __cdecl absdisk_dispatch(iregs __far *r); /* INT 25h/26h core */
 extern u8    absdisk_cf; /* status for the stub's live CF */
 
@@ -329,5 +333,8 @@ void         int21_init(void);
 void __cdecl int21_dispatch(iregs __far *r);
 void         set_al(iregs __far *r, u8 v);
 void         int21_error(iregs __far *r, u16 code);
+
+/* --- lfn.c: long file name (VFAT) API, INT 21h AX=71xx --- */
+void f71_lfn(iregs __far *r);
 
 #endif /* KERNEL_H */

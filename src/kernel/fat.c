@@ -526,6 +526,110 @@ int fat_dir_search(u16 dir_cluster, const u8 *name11, dirent83 *out) {
 	return fat_dir_search_i(dir_cluster, name11, out, &idx);
 }
 
+/* ============================================================
+ * VFAT long-name primitives (DOS 7 / Windows 95 LFN support).
+ * A long name is stored as a run of 0x0F "slot" entries that
+ * physically precede the 8.3 entry, in reverse order (the slot
+ * with bit 0x40 set comes first on disk and holds the last
+ * name fragment). Each slot carries 13 UTF-16 units; we keep
+ * only the low byte of each (OEM/ASCII).
+ * ============================================================ */
+
+/* Byte offsets of the 13 UTF-16 units inside a 32-byte slot
+ * (name1[5] @1, name2[6] @14, name3[2] @28). */
+static const u8 lfn_unit_off[13] = {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30};
+
+/* Checksum of an 8.3 name[11] tying long-name slots to their
+ * short entry: rotate the running sum right, then add a byte. */
+u8 fat_lfn_checksum(const u8 *name11) {
+	u8  sum = 0;
+	u16 i;
+	for (i = 0; i < 11; i++) {
+		sum = (u8)(((sum & 1) ? 0x80 : 0x00) + (sum >> 1) + name11[i]);
+	}
+	return sum;
+}
+
+/* Read one logical directory entry of dir_cluster starting at
+ * *index: gather any preceding long-name slots, then the 8.3
+ * entry. Fills *out83, writes the assembled long name (low byte
+ * of each unit, ASCIZ) into longname (capacity lmax, always
+ * terminated; empty when the entry has no valid long name) and
+ * advances *index past the 8.3 entry. Deleted and orphaned
+ * slots are skipped. 1 = entry, 0 = end of directory, -1 = I/O
+ * error (folded into 0 here: callers stop on non-positive). */
+int fat_dir_next_lfn(u16 dir_cluster, u16 *index, dirent83 *out83,
+                     char *longname, u16 lmax) {
+	static u8 buf[260];     /* assembled name, by ordinal slot */
+	u16       i = *index;
+	u16       len = 0;      /* assembled length so far */
+	u8        have = 0;     /* a valid slot run is in progress */
+	u8        sum = 0;      /* checksum the run claims */
+	dirent83  e;
+	longname[0] = '\0';
+	for (;;) {
+		const u8 *raw = (const u8 *)&e;
+		if (fat_dir_entry(dir_cluster, i, &e) != 0) {
+			*index = i;
+			return 0;
+		}
+		if (raw[0] == 0x00) { /* end-of-directory marker */
+			*index = i;
+			return 0;
+		}
+		if (raw[0] == 0xE5) { /* deleted: drop any pending run */
+			have = 0;
+			len = 0;
+			i++;
+			continue;
+		}
+		if (e.attr == ATTR_LFN) {
+			u8  seq = raw[0];
+			u8  ord = (u8)(seq & 0x1F);
+			u16 base;
+			u8  k;
+			if (seq & 0x40) { /* last slot (first on disk): restart */
+				have = 1;
+				len = 0;
+				sum = raw[13];
+			}
+			if (have && raw[13] == sum && ord >= 1 &&
+			    (u16)(ord * 13) <= sizeof(buf)) {
+				base = (u16)((ord - 1) * 13);
+				for (k = 0; k < 13; k++) {
+					u16 off = lfn_unit_off[k];
+					u16 unit = (u16)(raw[off] | (raw[off + 1] << 8));
+					if (unit == 0x0000 || unit == 0xFFFF) {
+						break;
+					}
+					buf[base + k] = (u8)unit;
+					if ((u16)(base + k + 1) > len) {
+						len = (u16)(base + k + 1);
+					}
+				}
+			} else {
+				have = 0; /* orphaned / mismatched slot */
+			}
+			i++;
+			continue;
+		}
+		/* regular 8.3 entry: emit it, with the long name if the
+		 * run is complete and its checksum matches this entry */
+		*out83 = e;
+		if (have && len > 0 && fat_lfn_checksum(e.name) == sum) {
+			u16 n = len < (u16)(lmax - 1) ? len : (u16)(lmax - 1);
+			u16 j;
+			for (j = 0; j < n; j++) {
+				longname[j] = (char)buf[j];
+			}
+			longname[n] = '\0';
+		}
+		*index = (u16)(i + 1);
+		return 1;
+	}
+}
+
+
 /* Parse one path component at *pp into an 11-char 8.3 name
  * (uppercased, '*' expanded to '?'s). Advances *pp past the
  * component and one trailing separator. 0 = OK, -1 = empty. */
