@@ -223,7 +223,7 @@ static void mcb_set_name(u16 block, const char __far *path) {
 }
 
 void proc_init(void) {
-	u16 first = (u16)(KERNEL_SEG + ((kernel_end_off + 15) >> 4));
+	u16 first = CONV_ARENA_SEG; /* kernel is in the HMA; arena starts low */
 	u16 top = (u16)(peekw(0x40, 0x13) << 6); /* BDA KB count -> paras */
 	mcb_first = first;
 	pokeb(first, 0, 'Z');

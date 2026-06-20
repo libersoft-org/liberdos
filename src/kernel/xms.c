@@ -299,9 +299,9 @@ void __cdecl xms_dispatch(xframe __far *r) {
 		if (a20_count != 0) {
 			a20_count--;
 		}
-		if (a20_count == 0) {
-			a20_set(0);
-		}
+		/* A20 must stay on: the kernel runs in the HMA, so the
+		 * gate is never physically disabled. The reference count
+		 * is still honored and success is reported. */
 		r->ax = 1;
 		return;
 	case 0x07: /* query A20 */

@@ -12,10 +12,20 @@ typedef unsigned char  u8;
 typedef unsigned short u16;
 typedef unsigned long  u32;
 
-/* Segment the kernel relocates itself to right after boot (the
- * boot sector loads it at 0x1000). Keep in sync with KERNEL_SEG
- * in startup.asm. */
+/* Segment the kernel relocates itself to right after boot. The
+ * kernel now runs in the HMA (0xFFFF:0x10+ = phys 0x100000),
+ * freeing conventional memory; KERNEL_SEG is kept only for
+ * legacy references. Keep in sync with startup.asm. */
 #define KERNEL_SEG 0x0060
+
+/* Conventional-memory arena start: with the kernel in the HMA,
+ * the first MCB sits just above the IVT + BIOS data area. A tiny
+ * stub at EMS_STUB_SEG (below the arena) carries the EMS
+ * "EMMXXXX0" signature plus a far jump to the INT 67h handler in
+ * the HMA - the signature must live below 1 MB where clients
+ * look for it. The arena starts just above the stub. */
+#define EMS_STUB_SEG   0x0060
+#define CONV_ARENA_SEG 0x0062
 
 /* Build a far pointer from segment:offset. NOTE: do not use with a
  * constant segment of 0 - Watcom treats such pointers as null-based

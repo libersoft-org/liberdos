@@ -161,10 +161,23 @@ void __cdecl kernel_main(u16 boot_drive) {
 	{
 		u16 ems_kb = ems_init();
 		if (ems_kb != 0) {
-			/* EMS detection reads vector_seg:000Ah expecting
-			 * "EMMXXXX0"; the signature sits at image offset 000Ah
-			 * (startup.asm), so the plain kernel segment works. */
-			install_vector(0x67, int67_entry_off);
+			/* The kernel runs in the HMA, so INT 67h cannot point at
+			 * the kernel segment directly: EMS clients read the
+			 * "EMMXXXX0" signature at vector_seg:000Ah, which in the
+			 * HMA would land in ROM (0xFFFF:000Ah). Install a tiny low
+			 * stub instead - a far JMP to the HMA handler plus the
+			 * signature - and aim INT 67h at it. */
+			static const char emm_sig[8] = {'E', 'M', 'M', 'X',
+			                                'X', 'X', 'X', '0'};
+			u16               i;
+			pokeb(EMS_STUB_SEG, 0x00, 0xEA); /* JMP FAR off:seg */
+			pokew(EMS_STUB_SEG, 0x01, int67_entry_off);
+			pokew(EMS_STUB_SEG, 0x03, get_cs()); /* HMA kernel segment */
+			for (i = 0; i < 8; i++) {
+				pokeb(EMS_STUB_SEG, (u16)(0x0A + i), (u8)emm_sig[i]);
+			}
+			pokew(0, 0x67 * 4, 0x0000); /* INT 67h -> EMS_STUB_SEG:0 */
+			pokew(0, 0x67 * 4 + 2, EMS_STUB_SEG);
 			con_puts("[ems] ");
 			con_put_dec(ems_kb);
 			con_puts(" KB expanded memory, frame D000\r\n");

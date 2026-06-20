@@ -50,21 +50,23 @@ segment _TEXT align=1 class=CODE
 ; Kernel entry. Boot sector jumps to 0x1000:0000 with
 ; DL = boot drive. Linked first, so this is image offset 0.
 ;
-; The kernel immediately relocates itself down to KERNEL_SEG
-; (0x0060, phys 0x600 - right above the BIOS data area) and
-; far-jumps there. The image has no segment fixups, so a plain
-; copy works; loading low directly is impossible because the
-; boot sector and its work buffers occupy 0x7C00+ while it is
-; still reading the kernel. This frees the whole 0x600..0xFFFF
-; region (~62 KB) for the conventional-memory arena.
+; The kernel immediately relocates itself into the HMA (segment
+; 0xFFFF, phys 0x100000 - the first 64 KB above 1 MB, reachable
+; in real mode with A20 on) and far-jumps there. The image has
+; no segment fixups, so a plain copy works; loading high directly
+; is impossible because the boot sector reads the image low. This
+; frees the ENTIRE conventional region (0x60..0x9FFF) for the
+; memory arena - the kernel no longer costs conventional memory.
 ;
 ; The jump leaves room for the "EMMXXXX0" signature at offset
 ; 000Ah: EMS detection reads the INT 67h vector and expects
 ; the EMM device name at vector_segment:000Ah. With the name
 ; right here the vector can simply use the kernel segment.
 ; ------------------------------------------------------------
-KERNEL_SEG equ 0x0060           ; final kernel segment (keep in sync
-                                ; with KERNEL_SEG in kernel.h)
+KERNEL_SEG equ 0x0060           ; legacy low segment (pre-HMA), kept
+                                ; for reference / sync notes
+HMA_SEG    equ 0xFFFF           ; HMA: 0xFFFF:0x10 = phys 0x100000
+                                ; (needs A20 on); the kernel runs here
 ..start:
 	jmp kentry                  ; 3 bytes
 	times 0x0A - ($ - $$) db 0  ; pad to offset 000Ah
@@ -72,19 +74,26 @@ KERNEL_SEG equ 0x0060           ; final kernel segment (keep in sync
 kentry:
 	cli                         ; the copy overwrites the boot stack:
 	cld                         ; no IRQs until the new stack is live
+	; Enable A20 (fast gate, port 92h) before relocating: the HMA
+	; at 0xFFFF:0x10+ is only addressable with A20 on; without it
+	; the copy below would wrap around to physical 0.
+	in al, 0x92
+	or al, 0x02
+	and al, 0xFE                ; leave the fast-reset bit clear
+	out 0x92, al
 	mov ax, cs
 	mov ds, ax
-	cmp ax, KERNEL_SEG          ; already low? (defensive)
+	cmp ax, HMA_SEG             ; already in the HMA? (defensive)
 	je .relocated
-	mov ax, KERNEL_SEG
+	mov ax, HMA_SEG
 	mov es, ax
 	xor si, si
 	xor di, di
 	mov cx, [_kernel_end_off]   ; whole image incl. KSTACK, in words
 	shr cx, 1
 	inc cx
-	rep movsw                   ; DL (boot drive) survives the copy
-	jmp KERNEL_SEG:.relocated
+	rep movsw                   ; copy into the HMA (DL survives)
+	jmp HMA_SEG:.relocated
 .relocated:
 	mov ax, cs                  ; tiny layout: one segment for everything
 	mov ds, ax
